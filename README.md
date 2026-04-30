@@ -19,6 +19,10 @@ A partially complete implementation of a machine learning library that can be us
   - Langevin Sampling
   - Convolutional Blocks, etc
 
+  - **Reinforcement Learning Architecture**: complete DDPM structure with:
+  - Q-Learning
+  - PPO
+
 - **Advanced Optimizers**: Adam and AdamW optimizer with momentum and bias correction
 - **Text Processing**: Built-in tokenization and textual embeddings
 - **Image Processing** - Uses OpenCV library to convert images to vectors/matrices

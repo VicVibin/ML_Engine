@@ -1,6 +1,5 @@
 #include "includes/image_loader.h"
 
-
 void BPrintImage(const graph &X, const int row_size, const int col_size)
 {
     auto X_in = std::make_shared<NodeBackProp>(X->op_name, X->dim[0],X->dim[1],X->dim[2],X->dim[3],1);
