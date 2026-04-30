@@ -1,15 +1,10 @@
 #pragma once
 #include <curand_kernel.h>
-#include <iostream>
-#include <chrono>
-#include <fstream>
-#include <sstream>
 #include <string>
-#include <windows.h>
-#include <vector>
+#include <chrono>
+#include <iostream>
 
 using str = std::string;
-using Text = std::vector<str>;
 
 #define XAVIER 6.0f
 #define ADAMW true
@@ -98,8 +93,6 @@ public:
     void end();
 
 };
-
-Text ImagePaths(const std::string& folder, const int filenums);
 
 void CheckError(const str& reason);
 

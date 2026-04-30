@@ -1,14 +1,11 @@
 #pragma once
 #include <curand_kernel.h>
-#include <utility>
 #include <string>
-#include <random>
-#include <unordered_set>
 
 #define BLOCK_SIZE 32
-#define THREADSPERBLOCK 512
+#define THREADSPERBLOCK 1024
 #define PIBY2 1.57079632679
-#define PI 3.14159
+#define PI 3.14159265359
 using str = std::string;
 
 template <typename T>
@@ -25,7 +22,7 @@ void Zerograd(const str name, T* ptr, const long long total)
     const int tpb = THREADSPERBLOCK;
     const int bpg = (total+tpb-1)/tpb;
     fillKernel<<<bpg,tpb>>>(ptr, (T)0.0f, total);
-    CheckError("Zero_grad " + name);
+    //CheckError("Zero_grad " + name);
 }
 
 __device__ double atomicAddDouble(double* __restrict__ address, double val);
@@ -36,15 +33,20 @@ __device__ inline void atomicMinFloat(float* __restrict__ addr, float value);
 
 __device__ __forceinline__ double warpReduceSum(double val, int offset = 16);
 
+__device__ __forceinline__ int batch_chan_offset(int flag, int batch_idx, int channel_idx, int num_channels, int inner_size);
+
 __device__ int ceil_div(const int a, const int b);
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, int d0, int d1, int d2, int d3, int i0, int i1, int i2, int i3);
 
-__global__ void Multiply(const float* __restrict__ X, const float* __restrict__ Y, float* __restrict__ Z, const long long total_size);
+__global__ void mulKernel(const float*  X, const float* Y, float*  Z, const long long total_size, const bool deriv = false);
+
+__global__ void HeadifyColChannel(const float* __restrict__ input, float* __restrict__ output, const int batch, const int req_channels, const int row, const int col, int flag);
 
 __global__ void PEncoding(float* __restrict__ X, const int t, const int t_dim, const int total_size);
 
 __global__ void MatPEncoding(const float* __restrict__ X, float* __restrict__ output, const int batch, const int row, const int col, const int total, const int start_idx = 0);
+
 
 __global__ void bmm(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, int batch_size, int m, int n, int p, int backward = 0, int A=1, int B=1, int C=1, float scale = 1);
 
@@ -54,58 +56,75 @@ __global__ void bmmATB(const float* __restrict__ a, const float* __restrict__ b,
 
 __global__ void bmmATBT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, int batch_size, int m, int n, int p,int backward = 0,int A=1,int B=1, int C=1, float scale = 1);
 
+__global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, 
+                    const int p, const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
+
+__global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
+                    const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
+
+__global__ void bcmmATB(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
+                    const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
+
+__global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
+                    const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
 
 
-__global__ void BatchMean(const float* __restrict__ data, double* __restrict__ mean, const int batch, const int channels, const int row, const int col, const bool scale = true);
+__global__ void BatchMean(const float* __restrict__ data, float* __restrict__ mean, const int batch, const int channels, const int row, const int col, const bool scale = true);
 
-__global__ void LayerMean(const float* __restrict__ data, double* __restrict__ mean, const int batch, const int channels, const int row, const int col, const bool scale = true);
+__global__ void LayerMean(const float* __restrict__ data, float* __restrict__ mean, const int batch, const int channels, const int row, const int col, const bool scale = true);
 
-__global__ void GroupMean(const float* __restrict__ data, double* __restrict__ mean,const int batch,const int channels,const int groups, const int row, const int col, const bool scale = true);
+__global__ void GroupMean(const float* __restrict__ data, float* __restrict__ mean,const int batch,const int channels,const int groups, const int row, const int col, const bool scale = true);
 
-__global__ void InstanceMean(const float* __restrict__ data,double* __restrict__ mean,const int batch,const int channels,const int row,const int col, const bool scale = true);
-
-
-
-__global__ void BatchStd(const float* __restrict__ data,const double* __restrict__ mean,double* __restrict__ std,const int batch, const int channels, const int row, const int col);
-
-__global__ void LayerStd(const float* __restrict__ data,const double* __restrict__ mean,double* __restrict__ std,const int batch, const int channels, const int row, const int col);
-
-__global__ void GroupStd(const float* __restrict__ data,const double* __restrict__ mean,double* __restrict__ std,const int batch,const int channels,const int groups, const int row, const int col);
-
-__global__ void InstanceStd(const float* __restrict__ data,const double* __restrict__ mean,double* __restrict__ std,const int batch,const int channels, const int row, const int col);
+__global__ void InstanceMean(const float* __restrict__ data, float* __restrict__ mean,const int batch,const int channels,const int row,const int col, const bool scale = true);
 
 
+__global__ void BatchStd(const float* __restrict__ data,const float* __restrict__ mean,float* __restrict__ std,const int batch, const int channels, const int row, const int col);
 
-__global__ void LNorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ std,const int batch,const int channels,
+__global__ void LayerStd(const float* __restrict__ data,const float* __restrict__ mean,float* __restrict__ std,const int batch, const int channels, const int row, const int col);
+
+__global__ void GroupStd(const float* __restrict__ data,const float* __restrict__ mean,float* __restrict__ std,const int batch,const int channels,const int groups, const int row, const int col);
+
+__global__ void InstanceStd(const float* __restrict__ data,const float* __restrict__ mean,float* __restrict__ std,const int batch,const int channels, const int row, const int col);
+
+
+
+__global__ void LNorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ std,const int batch,const int channels,
                       const int row,const int col,const float gamma,const float beta,const float epsilon);
 
-__global__ void BNorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ std,const int batch,const int channels,
+__global__ void BNorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ std,const int batch,const int channels,
                       const int row, const int col,const float gamma,const float beta, const float epsilon);
 
-__global__ void GNorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ std,const int batch,const int channels, 
+__global__ void GNorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ std,const int batch,const int channels, 
                       const int groups, const int row, const int col, const float gamma, const float beta, const float epsilon); 
 
-__global__ void INorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ std,const int batch,const int channels, 
+__global__ void INorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ std,const int batch,const int channels, 
                       const int row,const int col,const float gamma, const float beta, const float epsilon); 
 
 
                       
-__global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma,const double* __restrict__ ggammanode, const double* __restrict__ variance, 
+__global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma,const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col);
 
-__global__ void BatchBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma,const double* __restrict__ ggammanode, 
-                              const double* __restrict__ variance, const float gamma, const float epsilon,
+__global__ void BatchBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma,const float* __restrict__ ggammanode, 
+                              const float* __restrict__ variance, const float gamma, const float epsilon,
                               const int batch, const int channels, const int row, const int col);
 
-__global__ void GroupBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma, const double* __restrict__ ggammanode, 
-                              const double* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
+__global__ void GroupBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma, const float* __restrict__ ggammanode, 
+                              const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int groups, const int row, const int col);
 
-__global__ void InstanceBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma,const double* __restrict__ ggammanode, 
-                              const double* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
+__global__ void InstanceBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma,const float* __restrict__ ggammanode, 
+                              const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int row, const int col);
 
+__global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col);
+
+__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv =0);
+
 __global__ void Standard_Weights(float* __restrict__ w, const long long size, const float scale, const uint64_t seed);
+
+__global__ void PadOutput(const float* __restrict__ input, float* __restrict__ output, const int batch, const int channels, 
+                          const int inH, const int inW, const int outH, const int outW, const int padTop, const int padLeft);
 
 __global__ void CV2D(const float* __restrict__ X, const float* __restrict__ K, const float* __restrict__ bias, float* __restrict__ Y, 
                      const int N, const int Cout, const int Cin, const int H, const int W, const int KH=3, const int KW=3, const int pad=0, const int stride=1);
@@ -141,14 +160,26 @@ __global__ void SiLU(const float* __restrict__ input, float* __restrict__ output
 
 __global__ void deriv_SiLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
 
-__global__ void CConcatenate(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2);
+__global__ void TaNH(const float* __restrict__ input, float* __restrict__ output, const int total_size);
 
-__global__ void CSplit(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2);
+__global__ void deriv_TaNH(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
 
-__global__ void VConcatenate(const float* __restrict__ A, float* __restrict__ B, const int batch, const int channel,
+__global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ output, const int total_size);
+
+__global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
+
+__global__ void Channel_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col);
+
+__global__ void Channel_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col);
+
+__global__ void Column_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2);
+
+__global__ void Column_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2);
+
+__global__ void Vector_Concat(const float* __restrict__ A, float* __restrict__ B, const int batch, const int channel,
                              const int row, const int a_col, const int total_col, const int col_offset);
 
-__global__ void VSplit(const float* __restrict__ dB, float* __restrict__ dA, const int batch, const int channel,
+__global__ void Vector_Split(const float* __restrict__ dB, float* __restrict__ dA, const int batch, const int channel,
                        const int row, const int a_col, const int total_col, const int col_offset);
 
 __global__ void transpose(const float* __restrict__ X, float* __restrict__ output, const int batch_size, const int channels, 
@@ -158,9 +189,6 @@ __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, co
 
 __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, const int batch_size,const int depth,const int a, const int b, const int c, const int d);
 
-__global__ void BConcatenate(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col);
-
-__global__ void BSplit(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col);
 
 __global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const long long total_size);
 
@@ -190,9 +218,9 @@ __global__ void KeyUpdate(float* __restrict__ EmbedSpace, const float* __restric
 
 __global__ void OneHotEmbeddings(float* __restrict__ output, const int* __restrict__ keys,int clen,int max_clen,int vocab_size,long long total_size);
 
-__global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, int batch, int rows, int columns, const float scale = 1.0f);
+__global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, int batch,int channels, int rows, int columns, const float scale = 1.0f);
 
-__global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int batch, int rows, int columns);
+__global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int batch, int channels, int rows, int columns);
 
 __global__ void broadcast_add_general(const float* __restrict__ X, const float* __restrict__ bias, float* __restrict__ output, const int batch_size, const int channels, 
                                       const int a, const int b, const int c, const int d);
@@ -244,13 +272,15 @@ __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int
 
 __global__ void MSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const long long total);
 
-__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total);
+__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total, const bool last = true);
 
 __global__ void scalarMSE(const float* __restrict__ X, const float*  __restrict__ target, float*  __restrict__ output, const int batch_size, const long long total_size);
 
-__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total);
+__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total, const bool last = true);
 
 __global__ void scalarCE(const float* __restrict__ X, const float*  __restrict__ target, float*  __restrict__ output, const int batch_size, const long long total_size);
+
+__global__ void vectorE(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const int deriv = 0);
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float* __restrict__ max, const float *__restrict__ min, const int batch, const long long total_size);
 
@@ -272,30 +302,33 @@ __global__ void BMax(const float* __restrict__ data, float* __restrict__ value, 
 
 __global__ void BMin(const float* __restrict__ data, float* __restrict__ value, int batch, int channel, int out_size);
 
-__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int row, const int col);
+__global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr, int batch, int channels, int row, int col, int type);
 
-__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int row, const int col);
 
-__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int row, const int col, const int mode, const int transposed);
+__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col);
 
-__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int row, const int col, const int type, const long long total_size);
+__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col);
 
-void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int batch, const int row, const int col, const int type);
+__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int channels, const int row, const int col, const int mode, const int transposed);
 
-__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput, const int batch, const int row, const int col, const int type);
+__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
 
-void deriv_SoftMax(const float* __restrict__ output,const float* __restrict__ grad, float* __restrict__ dinput, const int batch,const int row,const int col, const int type);
+__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
+__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size);
 
-__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int row, const int col, const int type, const long long total_size);
+void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int batch, const int channels, const int row, const int col, const int type);
 
-void SoftMask(const float*__restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int batch, const int row, const int col, const int type);
+__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput, const int batch, const int channels, const int row, const int col, const int type);
+
+void deriv_SoftMax(const float* __restrict__ output,const float* __restrict__ grad, float* __restrict__ dinput, const int batch,const int channels,const int row,const int col, const int type);
+
+__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size);
+
+void SoftMask(const float*__restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int batch, const int channels, const int row, const int col, const int type);
 
 __global__ void ISNAN(const float* __restrict__ X, const long long total);
 
 __global__ void GatherEmbeddings(float* __restrict__ output,const float* __restrict__ EmbedSpace,const int* __restrict__ keys, int c, int max_c, const int embed_dim, const long long total);
-
-__global__ void PadOutput(const float* __restrict__ input, float* __restrict__ output, const int batch, const int channels, 
-                          const int inH, const int inW, const int outH, const int outW, const int padTop, const int padLeft);
 
 template <typename T1, typename T2>
 void ScaleValue(T1*  __restrict__ X, const T2 scale, const long long total, const int type = 0)
@@ -325,3 +358,67 @@ void ScalePtr(T1* __restrict__ X, const T2* __restrict__ scale, const long long 
 __global__ void TopKSampleKernel(const float* __restrict__ arr, int* __restrict__ out_idx, const int size, const int k, const float rand_val);
 
 __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const int size);
+
+__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv = 0);
+
+__global__ void minKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv=0);
+
+__global__ void maxKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv=0);
+
+__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv = false)
+{
+    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= total) return;
+    const int ac_id = actions[idx];
+    if(deriv) output[idx * action_dim + ac_id] += input[idx];
+    else output[idx] = input[idx * action_dim + ac_id];
+}
+
+__global__ void rl_discounted_returns(const float* __restrict__ trajectories, float* __restrict__ advantages, float* __restrict__ returns,
+                                      const float gamma, const float lambda, const int batch, const int traj_size){
+    const long long idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx >= batch) return;
+    float gae = 0.0f;
+    float next_val = 0.0f;
+    for (int t = traj_size-1; t >= 0; t--) 
+    {         
+        const int a_off = idx * traj_size * 5 + 5 * t; 
+        float delta = trajectories[a_off + 1] + gamma * next_val * (1.f - trajectories[a_off + 4]) - trajectories[a_off + 3];
+        gae = delta + gamma * lambda * (1.0f - trajectories[a_off + 4]) * gae;
+        advantages[idx * traj_size + t] = gae;
+        next_val = trajectories[a_off + 3];
+    }
+         
+    for (int t = 0; t < traj_size; t++)
+    {
+        returns[idx * traj_size + t] = advantages[idx * traj_size + t] + trajectories[idx * traj_size * 5 + 5 * t + 3]; // returns = adv + baseline
+    } 
+}
+
+__global__ void static_assign_values( const float* __restrict__ traj, const float* __restrict__ advantages, const float* __restrict__ returns, 
+    const float* __restrict__ states, const int*   __restrict__ idx,  
+    float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
+    float* __restrict__ out_ret, float* __restrict__ out_states,
+    const int batch, const int traj_size, const int state_dim, const int mini_batch_offset)         
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(global_idx  >= batch * state_dim) return;
+    const int d = global_idx % state_dim;
+    const int i  = global_idx / state_dim;
+    if (i >= batch || d >= state_dim) return;
+    const int t        = idx[mini_batch_offset + i]; 
+    const int batch_idx = t / traj_size;
+    const int step_idx  = t % traj_size;
+    const int traj_off  = (batch_idx * traj_size + step_idx) * 5;
+    if (d == 0)
+    {
+        out_actions[i] = traj[traj_off + 0];
+        out_logp[i]    = traj[traj_off + 2];
+        out_adv[i]     = advantages[t];
+        out_ret[i]     = returns[t];
+    }
+
+    if (d < state_dim) out_states[i * state_dim + d] = states[t * state_dim + d];
+}

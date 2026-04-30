@@ -47,8 +47,7 @@ __device__ int ceil_div(const int a, const int b)
 
 }
 
-__global__ void permute(const float* __restrict__ X, float* __restrict__ Y, const int d0, const int d1, 
-                        const int d2, const int d3, const int i0, const int i1, const int i2, const int i3)
+__global__ void permute(const float* __restrict__ X, float* __restrict__ Y, const int d0, const int d1, const int d2, const int d3, const int i0, const int i1, const int i2, const int i3)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= d0*d1*d2*d3) return;
@@ -79,12 +78,12 @@ __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, cons
     Y[out_idx] = X[idx];
 }
 
-__global__ void Multiply(const float* __restrict__ X, const float* __restrict__ Y, 
-                         float* __restrict__ Z, const long long total_size)
+__global__ void mulKernel(const float*  X, const float* Y, float* Z, const long long total_size, const bool deriv)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= total_size) return;
-    Z[idx] = X[idx]*Y[idx];
+    if(deriv) Z[idx] += X[idx]*Y[idx];
+    else Z[idx] = X[idx]*Y[idx];
 }
 
 __global__ void PEncoding(float* __restrict__ X, const int t, const int t_dim, const int total_size)
@@ -316,22 +315,250 @@ __global__ void bmmATBT(const float* __restrict__ a, const float* __restrict__ b
     }
 }
 
-__global__ void LayerMean(const float* __restrict__ data, double* __restrict__ mean,
+__device__ __forceinline__ int batch_chan_offset(int flag, int batch_idx, int channel_idx, int num_channels, int inner_size)
+{
+    /*
+    0 (bits 00) → [1 × 1 × …] broadcast both
+    1 (bits 01) → [B × 1 × …] has batch, broadcast channel
+    2 (bits 10) → [1 × C × …] broadcast batch, has channel
+    3 (bits 11) → [B × C × …] has both
+    */
+
+    const int has_batch = flag & 1;
+    const int has_chan  = (flag >> 1) & 1;
+    const int chan_stride_in_batch = has_chan ? num_channels : 1;
+    return (has_batch ? batch_idx * chan_stride_in_batch : 0) * inner_size
+         + (has_chan  ? channel_idx                      : 0) * inner_size;
+}
+
+__global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, 
+                    const  int batch_size, const int num_channels, const int m, const int n, const int p,
+                    const int backward, const int A, const int B, const int C, const float scale)
+{
+        /*
+    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
+            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
+            2 (bits 10) → [1 × C × …] broadcast batch, has channel
+            3 (bits 11) → [B × C × …] has both
+    */
+
+
+    const int linear_idx = blockIdx.z;
+    if (linear_idx >= batch_size * num_channels) return;
+    const int batch_idx   = linear_idx / num_channels;
+    const int channel_idx = linear_idx % num_channels;
+
+    const int row = threadIdx.y + blockIdx.y * blockDim.y;
+    const int col = threadIdx.x + blockIdx.x * blockDim.x;
+
+    __shared__ float s_A[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float s_B[BLOCK_SIZE][BLOCK_SIZE];
+
+    float sum = 0.0f;
+
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, n * p);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
+
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
+        s_A[threadIdx.y][threadIdx.x] =
+            (row < m && (t * BLOCK_SIZE + threadIdx.x) < n)
+            ? a[off_a + row * n + t * BLOCK_SIZE + threadIdx.x]
+            : 0.0f;
+
+        s_B[threadIdx.y][threadIdx.x] =
+            (col < p && (t * BLOCK_SIZE + threadIdx.y) < n)
+            ? b[off_b + (t * BLOCK_SIZE + threadIdx.y) * p + col]
+            : 0.0f;
+
+        __syncthreads();
+        for (int k = 0; k < BLOCK_SIZE; ++k)
+            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+        __syncthreads();
+    }
+
+    if (row < m && col < p) {
+        if (backward == 0) c[off_c + row * p + col]  = scale * sum;
+        else               c[off_c + row * p + col] += scale * sum;
+    }
+}
+
+__global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
+                       const int batch_size, const int num_channels, const int m, const int n, const int p,
+                       const int backward, const int A, const int B, const int C, const float scale)
+{
+        /*
+    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
+            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
+            2 (bits 10) → [1 × C × …] broadcast batch, has channel
+            3 (bits 11) → [B × C × …] has both
+    */
+
+    const int linear_idx = blockIdx.z;
+    if (linear_idx >= batch_size * num_channels) return;
+    const int batch_idx   = linear_idx / num_channels;
+    const int channel_idx = linear_idx % num_channels;
+
+    const int row = threadIdx.y + blockIdx.y * blockDim.y;
+    const int col = threadIdx.x + blockIdx.x * blockDim.x;
+
+    __shared__ float s_A[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float s_B[BLOCK_SIZE][BLOCK_SIZE];
+
+    float sum = 0.0f;
+
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, p * n);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
+
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
+        s_A[threadIdx.y][threadIdx.x] =
+            (row < m && (t * BLOCK_SIZE + threadIdx.x) < n)
+            ? a[off_a + row * n + t * BLOCK_SIZE + threadIdx.x]
+            : 0.0f;
+
+        s_B[threadIdx.y][threadIdx.x] =
+            (col < p && (t * BLOCK_SIZE + threadIdx.y) < n)
+            ? b[off_b + col * n + t * BLOCK_SIZE + threadIdx.y]
+            : 0.0f;
+
+        __syncthreads();
+        for (int k = 0; k < BLOCK_SIZE; ++k)
+            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+        __syncthreads();
+    }
+
+    if (row < m && col < p) {
+        if (backward == 0) c[off_c + row * p + col]  = scale * sum;
+        else               c[off_c + row * p + col] += scale * sum;
+    }
+}
+
+__global__ void bcmmATB(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
+                       const int batch_size, const int num_channels, const int m, const int n, const int p,
+                       const int backward, const int A, const int B, const int C, const float scale)
+{
+
+            /*
+    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
+            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
+            2 (bits 10) → [1 × C × …] broadcast batch, has channel
+            3 (bits 11) → [B × C × …] has both
+    */
+
+    const int linear_idx = blockIdx.z;
+    if (linear_idx >= batch_size * num_channels) return;
+    const int batch_idx   = linear_idx / num_channels;
+    const int channel_idx = linear_idx % num_channels;
+
+    const int row = threadIdx.y + blockIdx.y * blockDim.y;  // → n
+    const int col = threadIdx.x + blockIdx.x * blockDim.x;  // → p
+
+    __shared__ float s_A[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float s_B[BLOCK_SIZE][BLOCK_SIZE];
+
+    float sum = 0.0f;
+
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, m * p);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, n * p);
+
+    for (int t = 0; t < (m + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
+        // Aᵀ access: A[k, row]
+        const int k_A = t * BLOCK_SIZE + threadIdx.x;
+        s_A[threadIdx.y][threadIdx.x] =
+            (k_A < m && row < n)
+            ? a[off_a + k_A * n + row]
+            : 0.0f;
+
+        const int k_B = t * BLOCK_SIZE + threadIdx.y;
+        s_B[threadIdx.y][threadIdx.x] =
+            (k_B < m && col < p)
+            ? b[off_b + k_B * p + col]
+            : 0.0f;
+
+        __syncthreads();
+        for (int k = 0; k < BLOCK_SIZE; ++k)
+            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+        __syncthreads();
+    }
+
+    if (row < n && col < p) {
+        if (backward == 0) c[off_c + row * p + col]  = scale * sum;
+        else               c[off_c + row * p + col] += scale * sum;
+    }
+}
+
+__global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
+                        const int batch_size, const int num_channels, const int m, const int n, const int p,
+                        const int backward,   const int A, const int B, const int C, const float scale)
+{
+            /*
+    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
+            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
+            2 (bits 10) → [1 × C × …] broadcast batch, has channel
+            3 (bits 11) → [B × C × …] has both
+    */
+
+    const int linear_idx = blockIdx.z;
+    if (linear_idx >= batch_size * num_channels) return;
+    const int batch_idx   = linear_idx / num_channels;
+    const int channel_idx = linear_idx % num_channels;
+
+    const int row = threadIdx.y + blockIdx.y * blockDim.y;  
+    const int col = threadIdx.x + blockIdx.x * blockDim.x; 
+
+    __shared__ float s_A[BLOCK_SIZE][BLOCK_SIZE];
+    __shared__ float s_B[BLOCK_SIZE][BLOCK_SIZE];
+
+    float sum = 0.0f;
+
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, p * m);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, n * p);
+
+    for (int t = 0; t < (m + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
+        const int k_A = t * BLOCK_SIZE + threadIdx.x;
+        s_A[threadIdx.y][threadIdx.x] =
+            (k_A < m && row < n)
+            ? a[off_a + k_A * n + row]
+            : 0.0f;
+
+        const int k_B = t * BLOCK_SIZE + threadIdx.y;
+        s_B[threadIdx.y][threadIdx.x] =
+            (k_B < m && col < p)
+            ? b[off_b + col * m + k_B]
+            : 0.0f;
+
+        __syncthreads();
+        for (int k = 0; k < BLOCK_SIZE; ++k)
+            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+        __syncthreads();
+    }
+
+    if (row < n && col < p) {
+        if (!backward) c[off_c + row * p + col]  = scale * sum;
+        else           c[off_c + row * p + col] += scale * sum;
+    }
+}
+
+
+__global__ void LayerMean(const float* __restrict__ data, float* __restrict__ mean,
                           const int batch, const int channels, const int row, const int col, const bool scale)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int batch_idx  = blockIdx.x;         
     const int out_size   = row * col;
     const int group_size = channels * out_size;  
     const int tid        = threadIdx.x;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int channel_idx = i / out_size;
         const int spatial     = i % out_size;
-        sum += (double)data[batch_idx * channels * out_size + channel_idx * out_size + spatial];
+        sum += data[batch_idx * channels * out_size + channel_idx * out_size + spatial];
     }
 
     smem[tid] = sum;
@@ -344,27 +571,27 @@ __global__ void LayerMean(const float* __restrict__ data, double* __restrict__ m
 
     if (tid == 0)
     {
-        if(scale == true) mean[batch_idx] = smem[0] / (double)group_size;
+        if(scale == true) mean[batch_idx] = smem[0] / group_size;
         else mean[batch_idx] = smem[0];
     } 
 }
 
-__global__ void BatchMean(const float* __restrict__ data, double* __restrict__ mean, 
+__global__ void BatchMean(const float* __restrict__ data, float* __restrict__ mean, 
                           const int batch, const int channels, const int row, const int col, const bool scale)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int channel_idx = blockIdx.x;           // one block per channel
     const int out_size    = row * col;
     const int group_size  = batch * out_size;     // elements this block reduces over
     const int tid         = threadIdx.x;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int batch_idx = i / out_size;
         const int spatial   = i % out_size;
-        sum += (double)data[batch_idx * channels * out_size + channel_idx * out_size + spatial];
+        sum += data[batch_idx * channels * out_size + channel_idx * out_size + spatial];
     }
 
     smem[tid] = sum;
@@ -377,28 +604,28 @@ __global__ void BatchMean(const float* __restrict__ data, double* __restrict__ m
 
     if (tid == 0)
     {
-        if(scale == true) mean[channel_idx] = smem[0] / (double)group_size;
+        if(scale == true) mean[channel_idx] = smem[0] / group_size;
         else mean[channel_idx] = smem[0];
     } 
 }
 
-__global__ void GroupMean(const float* __restrict__ data, double* __restrict__ mean, const int batch, 
+__global__ void GroupMean(const float* __restrict__ data, float* __restrict__ mean, const int batch, 
                           const int channels, const int groups, const int row, const int col, const bool scale)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int group_size = (channels / groups) * row * col;  
     const int batch_idx  = blockIdx.x / groups;
     const int group_idx  = blockIdx.x % groups;
     const int ch_start   = group_idx * (channels / groups);
     const int tid        = threadIdx.x;
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int local_ch  = i / (row * col);
         const int spatial   = i % (row * col);
         const int ch        = ch_start + local_ch;
-        sum += (double)data[(batch_idx * channels + ch) * (row * col) + spatial];
+        sum += data[(batch_idx * channels + ch) * (row * col) + spatial];
     }
 
     smem[tid] = sum;
@@ -411,23 +638,23 @@ __global__ void GroupMean(const float* __restrict__ data, double* __restrict__ m
 
     if (tid == 0) 
     {
-        if(scale == true) mean[blockIdx.x] = smem[0] / (double)group_size;
+        if(scale == true) mean[blockIdx.x] = smem[0] / group_size;
         else mean[blockIdx.x] = smem[0];
     } 
 }
 
-__global__ void InstanceMean(const float* __restrict__ data, double* __restrict__ mean,
+__global__ void InstanceMean(const float* __restrict__ data, float* __restrict__ mean,
                              const int batch,const int channels,const int row, const int col, const bool scale)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int out_idx  = blockIdx.x;             
     const int out_size = row * col;
     const int tid      = threadIdx.x;
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < out_size; i += blockDim.x)
-        sum += (double)data[out_idx * out_size + i];
+        sum += data[out_idx * out_size + i];
 
     smem[tid] = sum;
     __syncthreads();
@@ -439,28 +666,29 @@ __global__ void InstanceMean(const float* __restrict__ data, double* __restrict_
 
     if (tid == 0)
     {
-        if(scale == true) mean[out_idx] = smem[0] / (double)out_size;
+        if(scale == true) mean[out_idx] = smem[0] / out_size;
         else mean[out_idx] = smem[0];
     } 
 }
 
-__global__ void LayerStd(const float* __restrict__ data, const double* __restrict__ mean, double* __restrict__ std,
+
+__global__ void LayerStd(const float* __restrict__ data, const float* __restrict__ mean, float* __restrict__ std,
                          const int batch, const int channels, const int row, const int col)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int batch_idx  = blockIdx.x;
     const int out_size   = row * col;
     const int group_size = channels * out_size;
     const int tid        = threadIdx.x;
-    const double mu      = mean[batch_idx];
+    const float mu      = mean[batch_idx];
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int channel_idx = i / out_size;
         const int spatial     = i % out_size;
-        const double diff     = (double)data[batch_idx * channels * out_size + channel_idx * out_size + spatial] - mu;
+        const float diff     = data[batch_idx * channels * out_size + channel_idx * out_size + spatial] - mu;
         sum += diff * diff;
     }
 
@@ -475,23 +703,23 @@ __global__ void LayerStd(const float* __restrict__ data, const double* __restric
     if (tid == 0) std[batch_idx] = smem[0];
 }
 
-__global__ void BatchStd(const float* __restrict__ data, const double* __restrict__ mean, double* __restrict__ std,
+__global__ void BatchStd(const float* __restrict__ data, const float* __restrict__ mean, float* __restrict__ std,
                          const int batch, const int channels, const int row, const int col)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int channel_idx = blockIdx.x;
     const int out_size    = row * col;
     const int group_size  = batch * out_size;
     const int tid         = threadIdx.x;
-    const double mu       = mean[channel_idx];
+    const float mu       = mean[channel_idx];
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int batch_idx = i / out_size;
         const int spatial   = i % out_size;
-        const double diff   = (double)data[batch_idx * channels * out_size + channel_idx * out_size + spatial] - mu;
+        const float diff   = data[batch_idx * channels * out_size + channel_idx * out_size + spatial] - mu;
         sum += diff * diff;
     }
 
@@ -506,25 +734,25 @@ __global__ void BatchStd(const float* __restrict__ data, const double* __restric
     if (tid == 0) std[channel_idx] = smem[0];
 }
 
-__global__ void GroupStd(const float* __restrict__ data, const double* __restrict__ mean, double* __restrict__ var,
+__global__ void GroupStd(const float* __restrict__ data, const float* __restrict__ mean, float* __restrict__ var,
                          const int batch, const int channels, const int groups, const int row, const int col)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int group_size = (channels / groups) * row * col;
     const int batch_idx  = blockIdx.x / groups;
     const int group_idx  = blockIdx.x % groups;
     const int ch_start   = group_idx * (channels / groups);
     const int tid        = threadIdx.x;
-    const double mu      = mean[blockIdx.x];
+    const float mu      = mean[blockIdx.x];
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < group_size; i += blockDim.x)
     {
         const int local_ch = i / (row * col);
         const int spatial  = i % (row * col);
         const int ch       = ch_start + local_ch;
-        const double diff  = (double)data[(batch_idx * channels + ch) * (row * col) + spatial] - mu;
+        const float diff  = data[(batch_idx * channels + ch) * (row * col) + spatial] - mu;
         sum += diff * diff;
     }
 
@@ -539,20 +767,20 @@ __global__ void GroupStd(const float* __restrict__ data, const double* __restric
     if (tid == 0) var[blockIdx.x] = smem[0]; 
 }
 
-__global__ void InstanceStd(const float* __restrict__ data, const double* __restrict__ mean, double* __restrict__ std,
+__global__ void InstanceStd(const float* __restrict__ data, const float* __restrict__ mean, float* __restrict__ std,
                             const int batch, const int channels, const int row, const int col)
 {
-    __shared__ double smem[THREADSPERBLOCK];
+    __shared__ float smem[THREADSPERBLOCK];
 
     const int out_idx  = blockIdx.x;
     const int out_size = row * col;
     const int tid      = threadIdx.x;
-    const double mu    = mean[out_idx];
+    const float mu    = mean[out_idx];
 
-    double sum = 0.0;
+    float sum = 0.0;
     for (int i = tid; i < out_size; i += blockDim.x)
     {
-        const double diff = (double)data[out_idx * out_size + i] - mu;
+        const float diff = data[out_idx * out_size + i] - mu;
         sum += diff * diff;
     }
 
@@ -568,7 +796,7 @@ __global__ void InstanceStd(const float* __restrict__ data, const double* __rest
 }
 
 
-__global__ void LNorm(float* __restrict__ data, const double* __restrict__ mean, const double*  __restrict__ std,
+__global__ void LNorm(float* __restrict__ data, const float* __restrict__ mean, const float*  __restrict__ std,
                       const int batch,const int channels, const int row,const int col,const float gamma,
                       const float beta,const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
@@ -581,7 +809,7 @@ __global__ void LNorm(float* __restrict__ data, const double* __restrict__ mean,
 
 }
 
-__global__ void BNorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ std,
+__global__ void BNorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ std,
                       const int batch, const int channels, const int row, const int col, const float gamma,
                       const float beta, const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
@@ -594,9 +822,9 @@ __global__ void BNorm(float* __restrict__ data, const double* __restrict__ mean,
     
 }
 
-__global__ void GNorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__ var,
+__global__ void GNorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__ var,
                       const int batch, const int channels, const int groups, const int row, const int col,
-                      const float gamma, const float beta, const float epsilon)
+                      const float gamma, const float beta, const float epsilon)  //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
     const long long global_idx = threadIdx.x + (long long)blockDim.x * blockIdx.x;
     if (global_idx >= (long long)batch * channels * row * col) return;
@@ -615,7 +843,7 @@ __global__ void GNorm(float* __restrict__ data, const double* __restrict__ mean,
     data[global_idx] = gamma * (data[global_idx] - mu) / sigma + beta;
 }
 
-__global__ void INorm(float* __restrict__ data, const double* __restrict__ mean, const double* __restrict__  std,
+__global__ void INorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__  std,
                       const int batch, const int channels, const int row, const int col, const float gamma, 
                       const float beta, const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
@@ -628,9 +856,8 @@ __global__ void INorm(float* __restrict__ data, const double* __restrict__ mean,
                        / sqrtf((1.0f/out_size)*std[batch_idx*channels+channel_idx] + epsilon)) + beta;
 }
 
-
 __global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, 
-                              const double* __restrict__ ggamma, const double* __restrict__ ggammanode, const double* __restrict__ variance, 
+                              const float* __restrict__ ggamma, const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col)
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -645,7 +872,7 @@ __global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict
 }
 
 __global__ void BatchBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, 
-                              const double* __restrict__ ggamma, const double* __restrict__ ggammanode, const double* __restrict__ variance, 
+                              const float* __restrict__ ggamma, const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col)
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -657,8 +884,8 @@ __global__ void BatchBackward(float* __restrict__ igrad, const float* __restrict
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx] - (ggamma[channel_idx] / N) - node[global_idx] * (ggammanode[channel_idx] / N));
 }
 
-__global__ void GroupBackward(float*__restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma,const double* __restrict__ ggammanode, 
-                              const double* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
+__global__ void GroupBackward(float*__restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma,const float* __restrict__ ggammanode, 
+                              const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int groups, const int row, const int col)
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -678,8 +905,8 @@ __global__ void GroupBackward(float*__restrict__ igrad, const float* __restrict_
 
 }
 
-__global__ void InstanceBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const double* __restrict__ ggamma,const double* __restrict__ ggammanode, 
-                              const double* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
+__global__ void InstanceBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, const float* __restrict__ ggamma,const float* __restrict__ ggammanode, 
+                              const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int row, const int col)
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -694,6 +921,35 @@ __global__ void InstanceBackward(float* __restrict__ igrad, const float* __restr
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx] - (ggamma[variance_idx] / N)
                          - node[global_idx] * (ggammanode[variance_idx] / N));
 
+}
+
+
+__global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col)
+{
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >=batch*row*col) return;
+    const int out_size = row*col;
+    const int N = channels * out_size; 
+    const int batch_idx = global_idx / N;
+    igrad[global_idx] += ngrad[batch_idx] / N;
+}
+
+
+
+__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv)
+{
+    const long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= size) return;
+    if(deriv == 0)
+    {
+        curandStatePhilox4_32_10_t state;
+        curand_init(seed, idx, 0, &state);
+        float val = curand_uniform(&state);
+        mask[idx] = (val > p) ? 1.0f : 0.0f;
+        output[idx] = data[idx] * mask[idx] * (1.0f / (1.0f - p));
+    }
+
+    else {output[idx] += data[idx] * mask[idx] * (1.0f / (1.0f - p));}
 }
 
 __global__ void Standard_Weights(float* __restrict__ w, const long long size, const float scale, const uint64_t seed){
@@ -1012,6 +1268,49 @@ __global__ void deriv_SiLU(const float* __restrict__ input, const float* __restr
     grad_out[global_idx] += grad_in[global_idx] * deriv;
 }
 
+__global__ void TaNH(const float* __restrict__ input, float* __restrict__ output, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float val = input[global_idx];
+    const float exp = expf(val);
+    const float negexp = 1.0f / exp;
+    output[global_idx] = (exp - negexp) / (exp + negexp);
+
+}
+
+__global__ void deriv_TaNH(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float exp2 = expf(2.0 * input[global_idx]);
+    const float negexp2 = 1.0 / exp2;
+    const float deriv = 4.0 / (exp2 + negexp2 + 2.0); 
+    grad_out[global_idx] += grad_in[global_idx] * deriv;
+
+}
+
+__global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ output, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float negexp = expf( -1.0 * input[global_idx]);
+    output[global_idx] = 1.0 / (1.0 + negexp);
+
+}
+
+__global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float exp = expf(input[global_idx]);
+    const float negexp = 1.0 / exp;
+    const float deriv = 1.0 / (exp + negexp + 2.0); 
+    grad_out[global_idx] += grad_in[global_idx] * deriv;
+
+
+}
+
 __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, const int batch_size,
                           const int depth, const int a, const int b, const int c, const int d) // (a,b) -> (c,d)
 {
@@ -1053,7 +1352,54 @@ __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, 
     Y[global_idx] += X[xOffset];}
 }
 
-__global__ void BConcatenate(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
+__global__ void HeadifyColChannel(const float* __restrict__ input, float* __restrict__ output, const int batch, const int req_channels, const int row, const int col, int flag)
+{
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >= batch * req_channels * row * col) return;
+    const int batch_idx = global_idx / (req_channels*row *col);
+    const int channel_idx = (global_idx / (row * col)) % req_channels;
+    const int outRow = (global_idx % (row * col)) / col;
+    const int outCol = (global_idx % (row * col)) % col;
+    if(flag == 0)
+    {
+        const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
+        output[global_idx] = input[input_idx];
+        return;
+    }
+    if(flag  == 1)
+    {
+        const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
+        output[input_idx] += input[global_idx];
+        return;
+    }
+    if (flag == 2)
+    {
+        const int full_col = col * req_channels; 
+        const int batch_idx   = global_idx / (row * full_col);
+        const int outRow      = (global_idx / full_col) % row;
+        const int c_out       = global_idx % full_col;
+        const int col_idx     = c_out / req_channels;
+        const int channel_idx = c_out % req_channels;
+        const int input_idx = batch_idx * req_channels * row * col + channel_idx * row * col + outRow * col + col_idx;
+        output[global_idx] = input[input_idx];
+        return;
+    }
+    
+    if(flag == 3)
+    {
+        const int full_col = col * req_channels; 
+        const int batch_idx   = global_idx / (row * full_col);
+        const int outRow      = (global_idx / full_col) % row;
+        const int c_out       = global_idx % full_col;
+        const int col_idx     = c_out / req_channels;
+        const int channel_idx = c_out % req_channels;
+        const int input_idx = batch_idx * req_channels * row * col + channel_idx * row * col + outRow * col + col_idx;
+        output[input_idx] += input[global_idx];
+        return;
+    }
+}
+
+__global__ void Channel_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
 {
     const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const int outsize = row*col;
@@ -1066,7 +1412,7 @@ __global__ void BConcatenate(const float* __restrict__ A, const float* __restric
     else C[global_idx] = B[batch_idx*c2*outsize+(channel_idx-c1)*outsize+ outRow*col + outCol];
 }
 
-__global__ void BSplit(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
+__global__ void Channel_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
 {
     const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const int outsize = row*col;
@@ -1079,7 +1425,7 @@ __global__ void BSplit(float* __restrict__ A, float* __restrict__ B, const float
     else  B[batch_idx*c2*outsize+(channel_idx-c1)*outsize+outRow*col+outCol] += C[global_idx];
 }
 
-__global__ void CConcatenate(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
+__global__ void Column_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
 {   
     const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const long long A_size = batch * channel * row * c1;
@@ -1088,7 +1434,7 @@ __global__ void CConcatenate(const float* __restrict__ A, const float* __restric
     else C[global_idx] = B[global_idx - A_size];
 }
 
-__global__ void CSplit(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
+__global__ void Column_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
 {   
     const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const long long A_size = batch * channel * row * c1;
@@ -1097,7 +1443,7 @@ __global__ void CSplit(float* __restrict__ A, float* __restrict__ B, const float
     else B[global_idx - A_size] += C[global_idx];
 }
 
-__global__ void VConcatenate(const float* __restrict__ A, float* __restrict__ B, const int batch, const int channel,
+__global__ void Vector_Concat(const float* __restrict__ A, float* __restrict__ B, const int batch, const int channel,
                              const int row, const int a_col, const int total_col, const int col_offset) 
 {
     const long long idx = threadIdx.x + (long long)blockDim.x * blockIdx.x;
@@ -1116,7 +1462,7 @@ __global__ void VConcatenate(const float* __restrict__ A, float* __restrict__ B,
     B[B_idx] = A[idx];
 }
 
-__global__ void VSplit(const float* __restrict__ dB, float* __restrict__ dA, const int batch, const int channel,
+__global__ void Vector_Split(const float* __restrict__ dB, float* __restrict__ dA, const int batch, const int channel,
                        const int row, const int a_col, const int total_col, const int col_offset)
 {
     const long long idx    = threadIdx.x + (long long)blockDim.x * blockIdx.x;
@@ -1208,29 +1554,37 @@ __global__ void OneHotEmbeddings(float* __restrict__ output,const int* __restric
     output[global_idx * vocab_size + key] = 1.0f;
 }
 
-__global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, int batch, int rows, int columns, const float scale)
+__global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, int batch, int channels, int rows, int columns, const float scale)
 {
-    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if(idx >= batch * rows) return;
-    const int batch_idx = idx / rows;
-    const int row_idx = idx % rows;
-    for (int i  = 0; i < columns; i++)
+
+    int col = blockIdx.x; 
+    if (col >= columns) return;
+
+    int tid = threadIdx.x;
+    int total_rows = batch * channels * rows;
+    float sum = 0.0f;
+    for (int i = tid; i < total_rows; i += blockDim.x){sum += X[i * columns + col];}
+    sum = warpReduceSum(sum);
+    static __shared__ float shared_sums[32];
+    int lane = tid % 32;
+    int wid = tid / 32;
+
+    if (lane == 0) shared_sums[wid] = sum;
+    __syncthreads();
+    if (wid == 0)
     {
-        atomicAdd(&Y[i], scale * X[(batch_idx * rows + row_idx) * columns + i]);
+        sum = (tid < (blockDim.x / 32)) ? shared_sums[lane] : 0.0f;
+        sum = warpReduceSum(sum);
+        if (tid == 0){atomicAdd(&Y[col], sum * scale);}
     }
 }
 
-__global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int batch, int rows, int columns)
+__global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int batch, int channels, int rows, int columns)
 {
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if(idx >= batch * rows) return;
-    const int batch_idx = idx / rows;
-    const int row_idx = idx % rows;
-
-    for(int i = 0; i < columns; ++i)
-    {
-        X[batch_idx * rows * columns + row_idx * columns + i] += Y[i];
-    }
+    if(idx >= batch * channels * rows) return;
+    const int base_offset = idx * columns;
+    for(int i = 0; i < columns; ++i){X[base_offset + i] += Y[i];}
 }
 
 __global__ void broadcast_add_general(const float* __restrict__ X, const float* __restrict__ bias, float* __restrict__ output, 
@@ -1384,13 +1738,14 @@ __global__ void MSE(const float* __restrict__ X, const float* __restrict__ targe
 
 }
 
-__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total) 
+__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a ,const int b, const long long total, const bool last) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    output[global_idx] = 2.0f * (x_val - tar) / (float)total;
+    if(last) output[global_idx] = 2.0f * (x_val - tar) / (float)total;
+    else {output[global_idx] += (2.0f * (x_val - tar) * grad[global_idx]) / (float)total;}
 
 }
 
@@ -1414,14 +1769,15 @@ __global__ void scalarMSE(const float* __restrict__ X, const float* __restrict__
     }
 }
 
-__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total) 
+__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a ,const int b, const long long total, const bool last) 
 {   
     //Cross Entropy Derivative
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    output[global_idx] = - (tar / (x_val + 1e-8f)) / (float)batch_size;
+    if(last) output[global_idx] = - (tar / (x_val + 1e-8f)) / (float)batch_size;
+    else output[global_idx] -=  (tar*grad[global_idx] / (x_val + 1e-8f)) / (float)batch_size;
 
 }
 
@@ -1442,6 +1798,16 @@ __global__ void scalarCE(const float* __restrict__ X, const float* __restrict__ 
         }
         atomicAdd(output, block_sum);
     }
+}
+
+__global__ void vectorE(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const int deriv) 
+{   
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >= total) return;
+    const float out = output[global_idx];
+    const float x_val = X[global_idx];
+    if(deriv == 1) output[global_idx] -= (logf(x_val) + 1.0f) * grad[global_idx];
+    else output[global_idx] =  -x_val *logf(x_val);
 }
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict__ max, const float * __restrict__ min, const int batch, const long long total_size) 
@@ -1557,231 +1923,229 @@ __global__ void BMin(const float* __restrict__ data, float* __restrict__ value, 
     atomicMinFloat(&value[batch_idx], val);
 }
 
-__global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr, int batch, int row, int col, int type)
+__global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr,
+                        int batch, int channels, int row, int col, int type)
 {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (type == 0) {                          
-        if (gid >= batch * row) return;
-        int b = gid / row, r = gid % row;
+    if (type == 0) {                           
+        if (gid >= batch * channels * row) return;
+        int bc = gid / row, r = gid % row;
         float m = -FLT_MAX;
         for (int c = 0; c < col; ++c)
-            m = fmaxf(m, data[(b * row + r) * col + c]);
+            m = fmaxf(m, data[bc * row * col + r * col + c]);
         maxArr[gid] = m;
-    } else {                                    // one max per (batch, col)
-        if (gid >= batch * col) return;
-        int b = gid / col, c = gid % col;
+    } else {                                   
+        if (gid >= batch * channels * col) return;
+        int bc = gid / col, c = gid % col;
         float m = -FLT_MAX;
         for (int r = 0; r < row; ++r)
-            m = fmaxf(m, data[(b * row + r) * col + c]);
+            m = fmaxf(m, data[bc * row * col + r * col + c]);
         maxArr[gid] = m;
     }
 }
 
-__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int row, const int col)
+__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr,
+                        const int batch, const int channels, const int row, const int col)
 {
-     /*
+    /*
     Note a very important fact for any future errors, in order to prevent future errors, 
     SumCols and rows ignores all 0s because it was designed for softmax/mask, so if the entire row or col adds to 0, ill be one
     */
-    int global_col = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_cols = batch * col;
-    if (global_col >= total_cols) return;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= batch * channels * col) return;
 
-    int b = global_col / col;  
-    int c = global_col % col;   
-
+    int bc = gid / col, c = gid % col;
     float sum = 0.0f;
-    for (int r = 0; r < row; ++r) {
-        int idx = (b * row * col) + (r * col) + c;
-        sum += data[idx]; 
-    }
-    if(sum < 1e-45f){ sum = 1.0f;}
-    arr[b * col + c] = sum;
+    for (int r = 0; r < row; ++r)
+        sum += data[bc * row * col + r * col + c];
+    if (sum < 1e-45f) sum = 1.0f;
+    arr[gid] = sum;
 }
 
-__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int row, const int col) 
+__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr,
+                        const int batch, const int channels, const int row, const int col)
 {
     /*
     Note a very important fact for any future errors, in order to prevent future errors, 
     SumCols and rows ignores all 0s because it was designed for softmax, so if the entire row or col adds to 0, ill be one
     */
-    int global_row = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_rows = batch * row;
-    if (global_row >= total_rows) return;
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= batch * channels * row) return;
 
-    int b = global_row / row;  
-    int r = global_row % row;   
-
+    int bc = gid / row, r = gid % row;
     float sum = 0.0f;
-    for (int c = 0; c < col; ++c) {
-        int idx = (b * row * col) + (r * col) + c;
-        sum += data[idx];
-    }
-
-    if(sum < 1e-45f){ sum = 1.0f;}
-    arr[b * row + r] = sum;
+    for (int c = 0; c < col; ++c)
+        sum += data[bc * row * col + r * col + c];
+    if (sum < 1e-45f) sum = 1.0f;
+    arr[gid] = sum;
 }
 
-__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int row, const int col, const int mode, const int transposed)
+__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr,
+                          const int batch, const int channels, const int row, const int col,
+                          const int mode, const int transposed)
 {
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_size = batch * row* col;
-    if (global_idx >= total_size) return;
-    int mat_in = global_idx / (row*col);
-    int row_in = (global_idx % (row*col) / col);
-    int col_in = ((global_idx % (row*col)) % col);
-    const int arr_idx = transposed ? mat_in * col + col_in : mat_in * row + row_in;
-    const float value = arr[arr_idx];
-    if(mode == 0){data[global_idx] *= value;}
-    else
-    {
-        /*
-        if(value <= 1e-45f && data[global_idx] <= 1e-45f){ data[global_idx] = 1.0f;}
-        if(value <= 1e-45f && data[global_idx] >= 1e-45f)
-        {
-            printf("Divide by 0 error in Scale Array... data[global_idx]: %f, value: %f \n", data[global_idx], value);
-            __trap();
-        }
-        
-        */
+    if (global_idx >= batch * channels * row * col) return;
 
-        data[global_idx] /= value;
-    }    
+    int bc     = global_idx / (row * col);
+    int row_in = (global_idx % (row * col)) / col;
+    int col_in = (global_idx % (row * col)) % col;
+
+    const int arr_idx = transposed ? bc * col + col_in : bc * row + row_in;
+    const float value = arr[arr_idx];
+    if (mode == 0) data[global_idx] *= value;
+    else           data[global_idx] /= value;
 }
 
-__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int row, const int col,
+__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv)
+{
+    const long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
+    if(global_idx >= total_size) return;
+    if(deriv == 1) output[global_idx] += data[global_idx] * surrogate_deriv[global_idx];
+    else{ output[global_idx] = expf(data[global_idx]);}
+}
+
+__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv)
+{
+    const long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
+    if(global_idx >= total_size) return;
+    if(deriv == 1) output[global_idx] += surrogate_deriv[global_idx] / data[global_idx];
+    else{ output[global_idx] = logf(data[global_idx]);}
+}
+
+__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output,
+                             const float* __restrict__ maxArr,
+                             const int channels, const int row, const int col,
                              const int type, const long long total_size)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
 
-    const int b   = idx / (row * col);
-    const int r   = (idx % (row * col)) / col;
-    const int c   = (idx % (row * col)) % col;
+    const int bc = idx / (row * col);
+    const int r  = (idx % (row * col)) / col;
+    const int c  = (idx % (row * col)) % col;
 
-    // type 0 → subtract row max; type 1 → subtract col max
-    const int arr_idx = (type == 0) ? b * row + r : b * col + c;
-    const float shifted = data[idx] - maxArr[arr_idx];  // always <= 0
-
-    output[idx] = expf(shifted);
+    const int arr_idx = (type == 0) ? bc * row + r : bc * col + c;
+    output[idx] = expf(data[idx] - maxArr[arr_idx]);
 }
 
-
-__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int row, const int col,
+__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output,
+                              const float* __restrict__ maxArr,
+                              const int channels, const int row, const int col,
                               const int type, const long long total_size)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
 
-    const int r = (idx % (row * col)) / col;
-    const int c = (idx % (row * col)) % col;
-    const int b = idx / (row * col);
+    const int bc = idx / (row * col);
+    const int r  = (idx % (row * col)) / col;
+    const int c  = (idx % (row * col)) % col;
 
-    // zero out upper triangle (causal mask)
     if (c > r) { output[idx] = 0.0f; return; }
 
-    const int arr_idx = (type == 0) ? b * row + r : b * col + c;
-    const float shifted = data[idx] - maxArr[arr_idx];  // always <= 0
-
-    output[idx] = expf(shifted);
+    const int arr_idx = (type == 0) ? bc * row + r : bc * col + c;
+    output[idx] = expf(data[idx] - maxArr[arr_idx]);
 }
 
-__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput, const int batch, const int row, const int col,
+__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad,
+                              float* __restrict__ dinput,
+                              const int batch, const int channels, const int row, const int col,
                               const int type)
 {
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (type == 0) {
-        if (global_idx >= batch * row) return;
-        int b = global_idx / row;
-        int r = global_idx % row;
+        if (global_idx >= batch * channels * row) return;
+        int bc = global_idx / row, r = global_idx % row;
 
         float dot = 0.0f;
         for (int c = 0; c < col; ++c) {
-            int idx = (b * row * col) + (r * col) + c;
+            int idx = bc * row * col + r * col + c;
             dot += grad[idx] * output[idx];
         }
         for (int c = 0; c < col; ++c) {
-            int idx = (b * row * col) + (r * col) + c;
+            int idx = bc * row * col + r * col + c;
             atomicAdd(&dinput[idx], output[idx] * (grad[idx] - dot));
         }
     } else {
-        if (global_idx >= batch * col) return;
-        int b = global_idx / col;
-        int c = global_idx % col;
+        if (global_idx >= batch * channels * col) return;
+        int bc = global_idx / col, c = global_idx % col;
 
         float dot = 0.0f;
         for (int r = 0; r < row; ++r) {
-            int idx = (b * row * col) + (r * col) + c;
+            int idx = bc * row * col + r * col + c;
             dot += grad[idx] * output[idx];
         }
         for (int r = 0; r < row; ++r) {
-            int idx = (b * row * col) + (r * col) + c;
+            int idx = bc * row * col + r * col + c;
             atomicAdd(&dinput[idx], output[idx] * (grad[idx] - dot));
         }
     }
 }
 
-void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr,
-             const int batch, const int row, const int col, const int type)
+void SoftMax(const float* __restrict__ data, float* __restrict__ arr,
+             float* __restrict__ output, float* __restrict__ maxArr,
+             const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb        = THREADSPERBLOCK;
-    const int total_size = batch * row * col;
-    const int max_elems  = (type == 0) ? batch * row : batch * col;
+    const long long total_size = (long long)batch * channels * row * col;
+    const int max_elems  = (type == 0) ? batch * channels * row
+                                       : batch * channels * col;
 
-    FindMax<<<(max_elems + tpb - 1) / tpb, tpb>>>(
-        data, maxArr, batch, row, col, type);
+    FindMax<<<(max_elems+tpb-1) / tpb, tpb>>>(
+        data, maxArr, batch, channels, row, col, type);
 
     exponentiate<<<(total_size + tpb - 1) / tpb, tpb>>>(
-        data, output, maxArr, row, col, type, total_size);
+        data, output, maxArr, channels, row, col, type, total_size);
 
     if (type == 0) {
-        SumCols<<<(batch * row + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col);
+        SumCols<<<(batch * channels * row + tpb - 1) / tpb, tpb>>>(
+            output, arr, batch, channels, row, col);
         Scale_arr<<<(total_size + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col, 1, 0);
+            output, arr, batch, channels, row, col, 1, 0);
     } else {
-        SumRows<<<(batch * col + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col);
+        SumRows<<<(batch * channels * col + tpb - 1) / tpb, tpb>>>(
+            output, arr, batch, channels, row, col);
         Scale_arr<<<(total_size + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col, 1, 1);
+            output, arr, batch, channels, row, col, 1, 1);
     }
 }
 
 void SoftMask(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr,
-              const int batch, const int row, const int col, const int type)
+              const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb        = THREADSPERBLOCK;
-    const int total_size = batch * row * col;
-    const int max_elems  = (type == 0) ? batch * row : batch * col;
+    const long long total_size = (long long)batch * channels * row * col;
+    const int max_elems  = (type == 0) ? batch * channels * row
+                                       : batch * channels * col;
 
     FindMax<<<(max_elems + tpb - 1) / tpb, tpb>>>(
-        data, maxArr, batch, row, col, type);
+        data, maxArr, batch, channels, row, col, type);
 
     exponentiateM<<<(total_size + tpb - 1) / tpb, tpb>>>(
-        data, output, maxArr, row, col, type, total_size);
+        data, output, maxArr, channels, row, col, type, total_size);
 
     if (type == 0) {
-        SumCols<<<(batch * row + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col);
+        SumCols<<<(batch * channels * row + tpb - 1) / tpb, tpb>>>(
+            output, arr, batch, channels, row, col);
         Scale_arr<<<(total_size + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col, 1, 0);
+            output, arr, batch, channels, row, col, 1, 0);
     } else {
-        SumRows<<<(batch * col + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col);
+        SumRows<<<(batch * channels * col + tpb - 1) / tpb, tpb>>>(
+            output, arr, batch, channels, row, col);
         Scale_arr<<<(total_size + tpb - 1) / tpb, tpb>>>(
-            output, arr, batch, row, col, 1, 1);
+            output, arr, batch, channels, row, col, 1, 1);
     }
 }
 
-void deriv_SoftMax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput,
-                   const int batch, const int row, const int col, const int type)
+void deriv_SoftMax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput, const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb = THREADSPERBLOCK;
-    const int b   = (type == 0) ? batch * row : batch * col;
-    deriv_softmax<<<(b + tpb - 1) / tpb, tpb>>>(
-        output, grad, dinput, batch, row, col, type);
+    const int elems = (type == 0) ? batch * channels * row
+                                  : batch * channels * col;
+    deriv_softmax<<<(elems + tpb - 1) / tpb, tpb>>>(
+        output, grad, dinput, batch, channels, row, col, type);
 }
 
 __global__ void ISNAN(const float* __restrict__ X, const long long total)
@@ -1885,3 +2249,64 @@ __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const
     }
     X[0] = max_idx;
 }
+
+__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv)
+{
+    int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >= total) return;
+    float val = input[global_idx];
+    if(deriv == 1) output[global_idx] += (val > min && val < max) ? grad[global_idx] : 0.0f;
+    else output[global_idx] = fminf(fmaxf(input[global_idx], min), max);
+}
+
+__global__ void minKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv)
+{
+    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= size) return;
+    const float A = inp_A[idx], B = inp_B[idx]; // 1.0f A, -1.0f B;
+    const float val = (A > B) ? B : A;
+    if(deriv == 1)
+    {
+        const float indicator = mask[idx]; // output is a place holder for node->grad
+        if(indicator == 1.0f) grad_A[idx] += output[idx];
+        if(indicator == -1.0f) grad_B[idx] += output[idx];
+    }
+    else{mask[idx] = (val == A) ? 1.0f : -1.0f; output[idx] = val;}
+
+}
+
+__global__ void maxKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv)
+{
+    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= size) return;
+    const float A = inp_A[idx], B = inp_B[idx]; // 1.0f A, -1.0f B;
+    const float val = (A < B) ? B : A;
+    if(deriv == 1)
+    {
+        const float indicator = mask[idx]; // output is a place holder for node->grad
+        if(indicator == 1.0f) grad_A[idx] += output[idx];
+        if(indicator == -1.0f) grad_B[idx] += output[idx];
+    }
+    else{mask[idx] = (val == A) ? 1.0f : -1.0f; output[idx] = val;}
+
+}
+
+__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv)
+{
+    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= total) return;
+    const int ac_id = actions[idx];
+    if(deriv) output[idx * action_dim + ac_id] += input[idx];
+    else output[idx] = input[idx * action_dim + ac_id];
+}
+
+__global__ void rl_discounted_returns(const float* __restrict__ trajectories, float* __restrict__ advantages, float* __restrict__ returns,
+                                      const float gamma, const float lambda, const int batch, const int traj_size);
+
+__global__ void static_assign_values( const float* __restrict__ traj, const float* __restrict__ advantages, const float* __restrict__ returns, 
+    const float* __restrict__ states, const int*   __restrict__ idx,  
+    float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
+    float* __restrict__ out_ret, float* __restrict__ out_states,
+    const int batch, const int traj_size, const int state_dim, const int mini_batch_offset);

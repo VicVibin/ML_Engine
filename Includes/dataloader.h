@@ -2,6 +2,9 @@
 #include <vector>
 #include <iostream>
 #include <map>
+#include <utility>
+#include <functional>
+#include <random>
 #include <unordered_set>
 #include <string>
 #include <fstream>
@@ -18,6 +21,8 @@
 
 using str = std::string;
 using Text = std::vector<std::string>;
+
+Text FolderPaths(const std::string& folder, const int filenums);
 
 class TextProcessor {
 public:

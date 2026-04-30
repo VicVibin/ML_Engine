@@ -1,5 +1,22 @@
 #include "includes/engine.h"
 
+float ReadValueAt(const graph& X, const int& idx, const bool grad)
+{
+    float* out_ptr = (float*)malloc(sizeof(float));
+    if(!grad) cudaMemcpy(out_ptr, X->output + idx, sizeof(float), cudaMemcpyDeviceToHost);
+    else cudaMemcpy(out_ptr, X->grad + idx, sizeof(float), cudaMemcpyDeviceToHost);
+    float out = out_ptr[0];
+    free(out_ptr);
+    return out;
+}
+
+void WriteValueAt(const graph& X, const float value, const int& idx, const bool grad)
+{
+    // @brief: Writes to a graph output for flag 0, and 1 for grad
+    if (!grad) cudaMemcpy(X->output + idx, &value, sizeof(float), cudaMemcpyHostToDevice);
+    else cudaMemcpy(X->grad + idx, &value, sizeof(float), cudaMemcpyHostToDevice);
+}
+
 void isNan(const str name, const float* X, const long long total)
 {
     const int tpb = THREADSPERBLOCK;
@@ -51,7 +68,7 @@ NodeBackProp::NodeBackProp(str name, int batch, int d1, int d2, int d3, int allo
             const int bpg = (total+tpb-1)/tpb;
             SafeCudaMalloc(op_name, output, total);
             SafeCudaMalloc(op_name, grad, total);
-            //CheckError("Scale initialization");
+            CheckError("Scale initialization");
 
             fillKernel<<<bpg,tpb>>>(grad,0.0f, total);
             //CheckError("Fill Kernel for Gradient");
@@ -87,217 +104,6 @@ void NodeBackProp::reshape(std::vector<int> new_dims)
     {std::cerr << "Reshape cannot change total size of tensor\n";
     std::exit(1);}
     for(int i=0;i<4;++i){dim[i] = new_dims[i];}
-}
-
-KVCache::KVCache(int max_len, int hidden) : max_len(max_len), hidden(hidden) 
-{
-SafeCudaMalloc("KVCache K", K, max_len*hidden);
-SafeCudaMalloc("KVCache V", V, max_len*hidden);
-}
-
-void KVCache::free() {cudaFree(K);cudaFree(V);}
-
-Ipointer i2p(const std::string& filepath, int row_size, int col_size) 
-{
-    Ipointer result;
-    
-    // Read image in color
-    cv::Mat img = cv::imread(filepath, cv::IMREAD_COLOR);
-    if (img.empty()) {
-        std::cerr << "Failed to load image!\n";
-        std::exit(1);
-    }
-
-    // If resizing is requested
-    if (row_size > 0 && col_size > 0) {
-        cv::resize(img, img, cv::Size(col_size, row_size), 0, 0, cv::INTER_AREA);
-    }
-
-    // Allocate memory for channels × rows × cols
-    int channels = img.channels();
-    int rows = img.rows;
-    int cols = img.cols;
-    float* P = (float*)malloc(rows * cols * channels * sizeof(float));
-
-    // Fill in channel-first format (C × H × W)
-    for (int ch = 0; ch < channels; ch++) {
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                cv::Vec3b pixel = img.at<cv::Vec3b>(r, c);
-                P[ch * rows * cols + r * cols + c] = (float)(pixel[ch]);
-            }
-        }
-    }
-
-    result.memory = P;
-    result.dimensions[0] = 1;        
-    result.dimensions[1] = channels;
-    result.dimensions[2] = rows;
-    result.dimensions[3] = cols;
-
-    return result;
-}
-
-cv::Mat p2i(Ipointer X)
-{
-    int rows = X.dimensions[2];
-    int cols = X.dimensions[3];
-    int channels = X.dimensions[1];
-    cv::Mat img(rows, cols, CV_8UC(channels));
-
-    for (int ch = 0; ch < channels; ch++) 
-    {
-        for (int r = 0; r < rows; r++) 
-        {
-            for (int c = 0; c < cols; c++) 
-            {
-                img.at<cv::Vec3b>(r, c)[ch] = (uchar)X.memory[ch * img.rows * img.cols + r* img.cols + c];
-            }
-        }
-    }
-    
-    return img;
-
-}
-
-graph i2n(std::string filepath, int row_size, int col_size)
-{
-
-    cv::Mat img = cv::imread(filepath, cv::IMREAD_COLOR);
-    if (img.empty())
-    {
-        std::cout << "Failed to load image!\n";
-        std::exit(1);
-    }
-    Ipointer X = i2p(filepath, row_size, col_size);
-    auto node = std::make_shared<NodeBackProp>(filepath,X.dimensions[0],X.dimensions[1],X.dimensions[2], X.dimensions[3], 1);
-    cudaMemcpy(node->output, X.memory, node->total * sizeof(float), cudaMemcpyHostToDevice);
-    free(X.memory);
-    return node;
-}
-
-cv::Mat n2i(const graph X)
-{
-    int rows = X->dim[2];
-    int cols = X->dim[3];
-    int channels = X->dim[1];
-    float *cpu_img = (float*)malloc(X->total*sizeof(float));
-    cudaMemcpy(cpu_img, X->output, X->total*sizeof(float), cudaMemcpyDeviceToHost);
-    cv::Mat img(rows, cols, CV_8UC(channels));
-    for (int ch = 0; ch < channels; ++ch) 
-    {
-        for (int r = 0; r < rows; ++r) 
-        {
-            for (int c = 0; c < cols; ++c) 
-            {   
-                uchar val = cpu_img[ch * img.rows * img.cols + r* img.cols + c];
-                img.at<cv::Vec3b>(r, c)[ch] = val;
-            }
-        }
-    }
-    free(cpu_img);
-    return img;
-
-}
-
-Ipointer Bi2p(const str& folder, const int num_images, const int row_size, const int col_size) {
-    Text filepaths = ImagePaths(folder, num_images);
-
-    if (filepaths.size() < num_images) {
-        std::cerr << "Not enough images in folder\n";
-        std::exit(1);
-    }
-
-    Ipointer result;
-    result.dimensions[0] = num_images;
-    result.dimensions[1] = 3; 
-    result.dimensions[2] = row_size;
-    result.dimensions[3] = col_size;
-    result.labels = filepaths;
-
-    float* P = (float*)malloc(3 * num_images * row_size * col_size * sizeof(float));
-    if (!P) {
-        std::cerr << "Memory allocation failed\n";
-        std::exit(1);
-    }
-
-    // For each image
-    for (int i = 0; i < num_images; i++) {
-        cv::Mat img = cv::imread(folder+"/"+filepaths[i], cv::IMREAD_COLOR);
-        if (img.empty()) 
-        {
-            std::cout << "Failed to load image: " << filepaths[i] << "\n";
-            free(P);
-            std::exit(1);
-
-        }
-
-        cv::resize(img, img, cv::Size(col_size, row_size), 0, 0, cv::INTER_AREA);
-
-        int channels = img.channels();  
-        int rows = img.rows;
-        int cols = img.cols;
-        if(channels != 3)
-        {
-            std::cout << "Image at path: " << filepaths[i] << " does not have 3 channels \n";
-            std::exit(1);
-        }
-
-        // Fill in channel-first format (C × H × W)
-        for (int ch = 0; ch < channels; ch++) {
-        for (int r = 0; r < rows; r++) {
-        for (int c = 0; c < cols; c++) 
-        {
-                    cv::Vec3b pixel = img.at<cv::Vec3b>(r, c);
-                    size_t index = i*channels*rows*cols + ch*rows*cols + r*cols + c;
-                    P[index] = (float)pixel[ch];
-                }
-            }
-        }
-    }
-    result.memory = P;
-
-    return result;
-}
-
-graph Bi2n(str filepath,const int num_images, const int row_size , const int col_size)
-{
-
-    Ipointer X = Bi2p(filepath, num_images, row_size, col_size);
-    std::cout << "Loaded " << num_images << " images from " << X.labels.size() << "\n";
-    for(auto & name : X.labels)
-    {
-        std::cout << name << "\n";
-    }
-    auto node = std::make_shared<NodeBackProp>(filepath,X.dimensions[0],X.dimensions[1],X.dimensions[2], X.dimensions[3], 1);
-    cudaMemcpy(node->output, X.memory, node->total * sizeof(float), cudaMemcpyHostToDevice);
-    free(X.memory);
-    return node;
-}
-
-cv::Mat Bn2i(const graph X)
-{
-    int batch    = X->dim[0];  
-    int channels = X->dim[1];  
-    int rows     = X->dim[2];
-    int cols     = X->dim[3];
-
-    float* cpu_img = (float*)malloc(X->total * sizeof(float));
-    cudaMemcpy(cpu_img, X->output, X->total * sizeof(float), cudaMemcpyDeviceToHost);
-
-    cv::Mat img(rows, cols * batch, CV_8UC(channels), cv::Scalar(0));
-
-    for (int b = 0; b < batch; ++b) {
-    for (int ch = 0; ch < channels; ++ch) {
-    for (int r = 0; r < rows; ++r) {
-    for (int c = 0; c < cols; ++c) {
-        int idx = b * (channels * rows * cols) + ch * (rows * cols) + r * cols + c;
-        uchar val = static_cast<uchar>(cpu_img[idx]);
-        img.at<cv::Vec3b>(r, b * cols + c)[ch] = val;
-    }}}}
-
-    free(cpu_img);
-    return img;
 }
 
 AdamParameter::AdamParameter(str n, int batch, int out, int in, int row, int col, double norm) : NodeBackProp(n, out, in, row, col,1), lr(LEARNING_RATE), t(1), b1(0.9), b2(0.999), epsilon(1e-8), batch_size(batch), group_norm(norm), weight_decay(0.01f)
@@ -401,8 +207,8 @@ void AdamParameter::load(std::ifstream& f)
 
     if (loaded_total != total)
     {
-        std::cerr << "Parameter size mismatch for '" << op_name
-                  << "': expected " << total << " but loaded " << loaded_total << "\n";
+        std::cerr << "Parameter size mismatch for '" << op_name << "': expected " << total << " but loaded " << loaded_total << "\n";
+        std::exit(1);
         // Skip past this parameter's 3 buffers (weights, m, v) to keep file cursor aligned
         f.seekg((long long)loaded_total * sizeof(float) * 3, std::ios::cur);
         if (!f)
@@ -727,23 +533,6 @@ void StandardDeNorm(const graph &X, const float img_max, const float mean, const
     //CheckError("StandardDeNorm kernel");
 }
 
-void BPrintImage(const graph &X, const int row_size, const int col_size)
-{
-    auto X_in = std::make_shared<NodeBackProp>(X->op_name, X->dim[0],X->dim[1],X->dim[2],X->dim[3],1);
-    cudaMemcpy(X_in->output, X->output, X->total*sizeof(float), cudaMemcpyDeviceToDevice);
-    CheckError("Memcpy");
-    BMinMaxNorm(X_in);
-    CheckError("BatchMinMaxNorm in BPrintImage");
-    auto image = Bn2i(X_in);
-
-    if(row_size > 0 && col_size > 0) cv::resize(image, image, cv::Size(row_size*X->dim[0], col_size), 0, 0, cv::INTER_AREA);
-    
-    cv::imshow(X_in->op_name, image);
-    cv::waitKey(0);
-    X_in->clear();
-
-}
-
 void prepare(const graph &base, const graph &input, const graph &target, int t, int T, const uint64_t seed)
 {
     if (input->total != target->total)
@@ -828,237 +617,10 @@ graph_tree topological_sort(const graph& root)
     return result;
 }
 
-str TextualEmbedding::preprocessWord(const str& word)
-{
-        str word_lower = word;
-        size_t dot_pos = word.find_last_of('.');
-        if (dot_pos != str::npos && dot_pos == word.length() - 1) {word_lower = word.substr(0, dot_pos);}
-        std::transform(word_lower.begin(), word_lower.end(),word_lower.begin(), ::tolower);
-        
-        return word_lower;
-};
-
-TextualEmbedding::TextualEmbedding(const int embed_dim, const int batch_size, const int max_c_len, const int max_vocab_size)
-    : MAX_BATCH_SIZE(batch_size), MAX_CONTEXT_LEN(max_c_len), MAX_VOCAB_SIZE(max_vocab_size), embed_dim(embed_dim)
-{
-        std::random_device rd;
-        const uint64_t seed =  ((uint64_t)rd() << 32) | rd();
-
-        SafeCudaMalloc("EmbedSpace", EmbedSpace, MAX_VOCAB_SIZE * embed_dim);
-        SafeCudaMalloc("Keys", encoder_keys, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-        SafeCudaMalloc("Keys", decoder_keys, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-        SafeCudaMalloc("Keys", target_keys, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-
-        const int embed_total = MAX_VOCAB_SIZE * embed_dim;
-        GaussianNoise<<<(embed_total+tpb-1)/tpb, tpb>>>(EmbedSpace, embed_total, seed);
-        
-        fillKernel<<<(MAX_BATCH_SIZE*MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(encoder_keys, INT_MIN, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-        fillKernel<<<(MAX_BATCH_SIZE*MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(decoder_keys, INT_MIN, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-        fillKernel<<<(MAX_BATCH_SIZE*MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(target_keys, INT_MIN, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
-        //CheckError("TextualEmbedding initialization");
-        updateVocabulary({"<START>", "<END>", "<UNK>", "<PAD>"});
-};
-
-TextualEmbedding::~TextualEmbedding()
-{
-    cudaFree(EmbedSpace);
-    cudaFree(encoder_keys);
-    cudaFree(decoder_keys);
-    cudaFree(target_keys);
-}
-
-void TextualEmbedding::updateVocabulary(const Text& texts)
-{       
-        /*
-        @author Updates the vocabulary with new words from the input texts. 
-        If new words are added, their embeddings are initialized with Gaussian noise.
-        */
-        std::random_device rd;
-        const uint64_t seed =  ((uint64_t)rd() << 32) | rd();
-
-        std::vector<int> new_indices;
-        for(const auto& word : texts) {
-        str word_lower = preprocessWord(word);
-        if (Vocabulary.find(word_lower) == Vocabulary.end()) {
-        int index = WordSpace.size();
-        if(index >= MAX_VOCAB_SIZE) {
-            std::cout << "Warning: Vocabulary size exceeded maximum limit of " 
-            << MAX_VOCAB_SIZE << ". Skipping word: " << word_lower << "\n";
-            continue;
-        }
-        WordSpace[word_lower] = index;
-        KeySpace[index] = word_lower;
-        Vocabulary.insert(word_lower);
-        new_indices.push_back(index);
-        }}
-        
-        if(!new_indices.empty()) {
-        for(int idx : new_indices) {
-        const int offset = idx * embed_dim;
-        GaussianNoise<<<(embed_dim+tpb-1)/tpb, tpb>>>(EmbedSpace + offset, embed_dim, seed);
-        }
-        //CheckError("Vocabulary update - new embeddings");
-        }
-};
-    
-void TextualEmbedding::encodeText(const Text& texts,const str key, const int batch_idx)
-{
-    /*
-    @author Encodes a single text input into its corresponding indices in the embedding space.
-    The encoded indices are stored in the keys tensor at the position corresponding to the batch index.
-    */
-    if(batch_idx >= MAX_BATCH_SIZE) 
-    {std::cout << "Error: batch_idx " << batch_idx << " exceeds MAX_BATCH_SIZE " << MAX_BATCH_SIZE << "\n";return;}
-    
-    const int offset = batch_idx * MAX_CONTEXT_LEN;
-    if (key == "E") fillKernel<<<(MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(encoder_keys + offset, INT_MIN, MAX_CONTEXT_LEN);
-    if (key == "D") fillKernel<<<(MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(decoder_keys + offset, INT_MIN, MAX_CONTEXT_LEN);
-    if (key == "T") fillKernel<<<(MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(target_keys + offset, INT_MIN, MAX_CONTEXT_LEN);
-
-    
-    const int num_tokens = std::min((int)texts.size(), MAX_CONTEXT_LEN);
-    
-    for(int i = 0; i < num_tokens; ++i)
-    {
-    str word_lower = preprocessWord(texts[i]);
-    int index = -1;
-    auto it = WordSpace.find(word_lower);
-    if(it != WordSpace.end()) {index = it->second;} 
-    else {std::cout << "Warning: Word '" << word_lower << "' not in vocabulary. Using masked value.\n";}
-    if(index >= MAX_VOCAB_SIZE || index < 0) {
-    std::cout << "Error: Invalid index " << index << " for word: " << word_lower << "\n";continue;}
-    if(key == "E"){ cudaMemcpy(&encoder_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    if(key == "D"){ cudaMemcpy(&decoder_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    if(key == "T"){ cudaMemcpy( &target_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    }
-    }
-
-void TextualEmbedding::rencodeText(const Text& texts, const str key, const int batch_idx, const int start_idx)
-{
-    /*
-    @author Recursively encodes a single text input into its corresponding indices in the embedding space
-    starting from the given start index. The encoded indices are stored in the keys tensor at the position 
-    corresponding to the batch index.
-    */
-    if(batch_idx >= MAX_BATCH_SIZE) 
-    {
-        std::cout << "Error: batch_idx " << batch_idx << " exceeds MAX_BATCH_SIZE " << MAX_BATCH_SIZE << "\n";
-        std::exit(1);
-    }
-    
-    const int offset = batch_idx * MAX_CONTEXT_LEN + start_idx;
-    const int num_tokens = std::min((int)texts.size(), MAX_CONTEXT_LEN - start_idx);
-    
-    for(int i = 0; i < num_tokens; ++i)
-    {
-    str word_lower = preprocessWord(texts[i]);
-    int index = -1;
-    auto it = WordSpace.find(word_lower);
-    if(it != WordSpace.end()) {index = it->second;} 
-    else {std::cout << "Warning: Word '" << word_lower << "' not in vocabulary. Using masked value.\n";}
-    if(index >= MAX_VOCAB_SIZE || index < 0) {
-    std::cout << "Error: Invalid index " << index << " for word: " << word_lower << "\n";continue;}
-    if(key == "E") {cudaMemcpy(&encoder_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    if(key == "D") {cudaMemcpy(&decoder_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    if(key == "T") {cudaMemcpy(&target_keys[offset + i], &index, sizeof(int), cudaMemcpyHostToDevice); continue;}
-    }
-    
-    //CheckError("Text encoding");
-    }
-
-void TextualEmbedding::encodeBatch(const BatchText& batch_texts, const str key)
-{
-    /* @author 
-    Encodes batches of texts into their corresponding indices in the embedding space. 
-    The encoded indices are stored in the keys tensor at the position corresponding to the batch index.
-    */
-    const int batch_size = std::min((int)batch_texts.size(), MAX_BATCH_SIZE);
-    for(int b = 0; b < batch_size; ++b) 
-    {
-        //updateVocabulary(batch_texts[b]);
-        encodeText(batch_texts[b], key,b);
-    
-    }}
-
-void TextualEmbedding::forward(const graph&X, const str key)
-{
-        /*
-        @author Performs the forward pass to retrieve embeddings for the encoded texts.
-        It gathers embeddings from the embedding space based on the keys tensor and returns the output tensor matrices.
-        */
-
-        if(X->dim[0] > MAX_BATCH_SIZE || X->dim[2] > MAX_CONTEXT_LEN) 
-        {
-            printf("Dimension Mismatch... Received (Batch x Context): (%i, %i), Max: (%i, %i)", 
-            X->dim[0], X->dim[2], MAX_BATCH_SIZE, MAX_CONTEXT_LEN);std::exit(1);
-        }
-
-        const int bpg = (X->total+tpb-1)/tpb;
-        if(key == "E") GatherEmbeddings<<<bpg, tpb>>>(X->output, EmbedSpace, encoder_keys, X->dim[2], MAX_CONTEXT_LEN, embed_dim, X->total);
-        if(key == "D") GatherEmbeddings<<<bpg, tpb>>>(X->output, EmbedSpace, decoder_keys, X->dim[2], MAX_CONTEXT_LEN, embed_dim, X->total);
-        if(key == "T") std::cout << "Textual Embedding Forward pass is for gathering embedding for encoders and decoders.. continuing \n";
-        
-        //CheckError("Forward pass - gather embeddings");
-    }
- 
-void TextualEmbedding::rforward(const graph&X,const str key, const int start_idx)
-{
-        /*
-        @author Performs the recursive forward pass to retrieve embeddings for the encoded texts at the bottom of X.
-        It gathers embeddings from the embedding space based on the keys tensor and returns the output tensor matrices.
-        It also assumes you're only working on batch 1.
-        */
-        if(X->dim[0] != 1 || X->dim[2] > MAX_CONTEXT_LEN) 
-        {
-        printf("Dimension Mismatch... Received (Batch x Context): (%i, %i), Max: (%i, %i), can only recursively call on single batches", 
-            X->dim[0], X->dim[2], MAX_BATCH_SIZE, MAX_CONTEXT_LEN);std::exit(1);
-        }
-        
-        const int bpg = (embed_dim+tpb-1)/tpb;
-        const int xOffset = start_idx * embed_dim;
-        if (key == "E") GatherEmbeddings<<<bpg, tpb>>>(X->output + xOffset, EmbedSpace, encoder_keys + start_idx, 1, 1, embed_dim, embed_dim);
-        if (key == "D") GatherEmbeddings<<<bpg, tpb>>>(X->output + xOffset, EmbedSpace, decoder_keys + start_idx, 1, 1, embed_dim, embed_dim);
-                
-        //CheckError("Forward pass - gather embeddings");
-    }
-        
-void TextualEmbedding::one_hot_forward(const graph&X)
-{
-        /*
-        @author Performs a forward pass to retrieve one-hot encoded embeddings for the encoded texts.
-        It creates one-hot vectors based on the keys tensor and returns the output tensor matrices.
-        */
-        if(X->dim[0] > MAX_BATCH_SIZE || X->dim[2] > MAX_CONTEXT_LEN) {
-            printf("Dimension Mismatch... Received (Batch x Context): (%i, %i), Max: (%i, %i)", 
-            X->dim[0], X->dim[2], MAX_BATCH_SIZE, MAX_CONTEXT_LEN);std::exit(1);
-        }
-        const int size = X->dim[0] * X->dim[2];
-        const int bpg = (X->total+tpb-1)/tpb;
-        fillKernel<<<bpg, tpb>>>(X->output, 0.0f, X->total);
-        OneHotEmbeddings<<<bpg,tpb>>>(X->output, target_keys, X->dim[2], MAX_CONTEXT_LEN, Vocabulary.size(), size);
-        //CheckError("One-hot Forward pass - gather embeddings");
-       
-}
-
-void TextualEmbedding::EmbeddingUpdate(const graph& X, const str key)
-{
-        /*
-        @author Updates the embedding space using gradients from backpropagation. 
-        If custom keys are provided, they are used for the update; otherwise, the internal keys are used
-        */
-       const int tpb = THREADSPERBLOCK; 
-       const int bpg = (X->total+tpb-1)/tpb;
-       if(key == "E") KeyUpdate<<<bpg,tpb>>>(EmbedSpace, X->grad, encoder_keys,X->dim[2],MAX_CONTEXT_LEN, embed_dim,LEARNING_RATE,X->total);
-       if(key == "D") KeyUpdate<<<bpg,tpb>>>(EmbedSpace, X->grad, decoder_keys,X->dim[2],MAX_CONTEXT_LEN, embed_dim,LEARNING_RATE,X->total);
-       if(key == "T") std::cout << "Embedding only updates for decoders and encoders \n";
-       //CheckError("Key Update in Embedding Space update in Textual Embedding");
-        
-}
-
 graph GraphOperations::like(const graph& X, const str name)
 {
     /*
-    @author Function requires manual clearing of nodes created during graph computation
+    @brief Function requires manual clearing of nodes created during graph computation
     */
     auto node = std::make_shared<NodeBackProp>(name, X->dim[0], X->dim[1], X->dim[2], X->dim[3],1);
     node->inputs = {};
@@ -1067,6 +629,101 @@ graph GraphOperations::like(const graph& X, const str name)
     node->backward = [=](){};
     node->zero_grad = [=](){Zerograd(node);};
     node->free = [=](){};
+    return node;
+}
+
+graph GraphOperations::Dropout(const graph& X, const float p, const bool eval)
+{
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    auto node = std::make_shared<AdamParameter>("Dropout " + X->op_name, a,b,c,d,1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    std::random_device *rd = new std::random_device();
+    float* mask = nullptr;
+    if(!eval) SafeCudaMalloc("Dropout Mask", mask, node->total);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    node->forward = [=]()
+    {
+        const uint64_t seed =  ((uint64_t)rd->operator()() << 32) | rd->operator()();
+        if (!eval) dropoutKernel<<<bpg,tpb>>>(X->output, mask,node->output, node->total,p, seed);
+        else cudaMemcpy(node->output, X->output, node->total*sizeof(float), cudaMemcpyDeviceToDevice);
+         //CheckError("Dropout forward");
+    };
+
+    node->backward = [=]()
+    {
+        if (!eval) dropoutKernel<<<bpg,tpb>>>(X->output, mask,node->output, node->total,p,0,1);
+        else cudaMemcpy(X->grad, node->grad, node->total*sizeof(float), cudaMemcpyDeviceToDevice);
+        //CheckError("Dropout backward");
+    };
+    node->zero_grad = [=](){Zerograd(node);};
+    node->free = [=]()
+    {
+        delete rd;
+        cudaFree(mask);
+        node->clear();
+    };
+    return node;
+}
+
+graph GraphOperations::HeadifytoChannel(const graph& X, const int channels)
+{
+    if (X->dim[1] != 1 || X->dim[3] % channels != 0)
+    {
+        std::cerr << "Input to headify must have channel dimension of 1 and width must be divisible by number of heads \n";
+        Dimension(X);
+        std::exit(1);
+    }
+
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    auto node = std::make_shared<NodeBackProp>("Headified Channel of " + X->op_name, a, channels, c, d / channels,1);
+    const int tpb = THREADSPERBLOCK;
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    
+    node->forward = [=]()
+    {
+        //isNan(X);
+        HeadifyColChannel<<<(node->total+tpb-1)/tpb,tpb>>>(X->output, node->output, a, b, c, d, channels);
+        //CheckError("Headify forward");
+    };
+    
+    node->backward = [=]()
+    {
+        //isNan(node,1);
+        HeadifyColChannel<<<(node->total+tpb-1)/tpb,tpb>>>(node->grad, X->grad, a, channels, c, d / channels, 1);
+        //CheckError("Headify backward");
+    };
+    
+    node->zero_grad = [=](){Zerograd(node);};
+    node->free = [=](){node->clear();};
+    return node;
+}
+
+graph GraphOperations::DeHeadify(const graph& X)
+{
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    auto node = std::make_shared<NodeBackProp>("Deheadified " + X->op_name, a, 1, c, b*d,1);
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    node->inputs = {X};
+    node->forward = [=]()
+    {
+        //isNan(X);
+        HeadifyColChannel<<<(node->total+tpb-1)/tpb,tpb>>>(X->output, node->output, a, b, c, d, 2);
+        //CheckError("DeHeadify forward");
+    };
+    
+    node->backward = [=]()
+    {
+        //isNan(node,1);
+        HeadifyColChannel<<<(node->total+tpb-1)/tpb,tpb>>>(node->grad, X->grad, a, b, c, d, 3);
+        //CheckError("DeHeadify backward");
+    };
+    
+    node->zero_grad = [=](){Zerograd(node);};
+    node->free = [=](){ node->clear();};
     return node;
 }
 
@@ -1098,6 +755,39 @@ graph GraphOperations::Permute(const graph& X, const int i0, const int i1, const
     
     node->free = [=](){node->clear();};
     node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
+
+graph GraphOperations::Clamp(const graph& X, const float min, const float max)
+{
+    const int batch = X->dim[0];
+    const int channels = X->dim[1];
+    const int a = X->dim[2];
+    const int b = X->dim[3];
+
+    auto node = std::make_shared<NodeBackProp>("Clamp", batch, channels, a, b, 1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+
+    node->forward = [=]()
+    {
+        //isNan(X);
+        clampKernel<<<bpg,tpb>>>(X->output,nullptr,node->output,min, max, node->total);
+        //CheckError("Exp forward");
+    };
+
+    node->backward = [=]()
+    {
+        clampKernel<<<bpg,tpb>>>(X->output, node->grad, X->grad,min, max, node->total,1);
+        //CheckError("Exp Backward");
+    };
+
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+
+        
     return node;
 }
 
@@ -1214,6 +904,51 @@ graph GraphOperations::Broadcast_Add(const graph& A, const graph& B)
     return node;
 }
 
+graph GraphOperations::Bias_Add(const graph& A, const graph& B)
+    {
+        if(B->dim[0] != 1 || B->dim[1] != 1 || B->dim[2] != 1 || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in Bias_Add.. Bias must be a 1D vector matching at dim[3] \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0];
+        const int channels = A->dim[1];
+        const int a = A->dim[2];
+        const int b = A->dim[3];
+
+        auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
+        node->inputs = {A,B};
+        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (node->total+tpb-1)/tpb;
+
+        node->forward = [=]()
+        {
+            //isNan(A); //isNan(B);
+            cudaMemcpy(node->output, A->output, A->total*sizeof(float),cudaMemcpyDeviceToDevice);
+            BCumAdd<<<bpg,tpb>>>(node->output, B->output,batch,channels,a,b);
+            //CheckError("Bias_Add forward");
+        };
+
+        node->backward = [=]()
+        {
+            Accumulate<<<bpg,tpb>>>(node->grad, A->grad, node->total);
+            //CheckError("Add backward - A grad");
+
+            BCompress<<<b, tpb>>>(node->grad, B->grad, batch, channels, a, b);
+            //CheckError("Add backward - B grad");
+        };
+
+        node->free = [=](){node->clear();};
+        node->zero_grad = [=](){Zerograd(node);};
+
+        
+        return node;
+    }
+
 graph GraphOperations::Broadcast_Channel(const graph& A, const graph& B)
 {
     if(A->dim[1] != B->dim[3] || B->dim[1] != 1 || B->dim[2] != 1)
@@ -1261,7 +996,73 @@ graph GraphOperations::Broadcast_Channel(const graph& A, const graph& B)
     return node;
 }
 
-graph GraphOperations::Add(const graph& A, const graph& B)
+graph GraphOperations::Exp(const graph& X)
+{
+    const int batch = X->dim[0];
+    const int channels = X->dim[1];
+    const int a = X->dim[2];
+    const int b = X->dim[3];
+
+    auto node = std::make_shared<NodeBackProp>("Exponentiate", batch, channels, a, b, 1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+
+    node->forward = [=]()
+    {
+        //isNan(X);
+        exponentiate<<<bpg,tpb>>>(X->output,nullptr,node->output, node->total);
+        //CheckError("Exp forward");
+    };
+
+    node->backward = [=]()
+    {
+        exponentiate<<<bpg,tpb>>>(node->output,node->grad, X->grad, node->total,1);
+        //CheckError("Exp Backward");
+    };
+
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+
+        
+    return node;
+}
+
+graph GraphOperations::Log(const graph& X)
+{
+    const int batch = X->dim[0];
+    const int channels = X->dim[1];
+    const int a = X->dim[2];
+    const int b = X->dim[3];
+
+    auto node = std::make_shared<NodeBackProp>("Exponentiate", batch, channels, a, b, 1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+
+    node->forward = [=]()
+    {
+        //isNan(X);
+        natural_logarithm<<<bpg,tpb>>>(X->output,nullptr,node->output, node->total);
+        //CheckError("Exp forward");
+    };
+
+    node->backward = [=]()
+    {
+        natural_logarithm<<<bpg,tpb>>>(X->output,node->grad, X->grad, node->total,1);
+        //CheckError("Exp Backward");
+    };
+
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+
+        
+    return node;
+}
+
+graph GraphOperations::Add(const graph& A, const graph& B, const bool last)
     {
         if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
         {
@@ -1291,6 +1092,7 @@ graph GraphOperations::Add(const graph& A, const graph& B)
 
         node->backward = [=]()
         {
+        if(last) fillKernel<<<bpg,tpb>>>(node->grad,1.0f,node->total);
             Accumulate<<<bpg,tpb>>>(node->grad, A->grad, node->total);
             //CheckError("Add backward - A grad");
 
@@ -1304,6 +1106,143 @@ graph GraphOperations::Add(const graph& A, const graph& B)
         
         return node;
     }
+
+graph GraphOperations::Multiply(const graph& A, const graph& B, const bool last)
+    {
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in Add \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0];
+        const int channels = A->dim[1];
+        const int a = A->dim[2];
+        const int b = A->dim[3];
+
+        auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
+        node->inputs = {A,B};
+        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (node->total+tpb-1)/tpb;
+
+        node->forward = [=]()
+        {
+            //isNan(A); //isNan(B);
+            mulKernel<<<bpg,tpb>>>(A->output, B->output, node->output, node->total);
+            //CheckError("Add forward");
+        };
+
+        node->backward = [=]()
+        {
+            if(last) fillKernel<<<bpg,tpb>>>(node->grad,1.0f,node->total); 
+            mulKernel<<<bpg,tpb>>>(node->grad, B->grad, A->grad, node->total, true);
+            //CheckError("Add backward - A grad");
+
+            mulKernel<<<bpg,tpb>>>(node->grad, A->grad, B->grad, node->total, true);
+            //CheckError("Add backward - B grad");
+        };
+
+        node->free = [=](){node->clear();};
+        node->zero_grad = [=](){Zerograd(node);};
+
+        
+        return node;
+    }
+
+graph GraphOperations::Min(const graph& A, const graph& B)
+    {
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in Add \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0];
+        const int channels = A->dim[1];
+        const int a = A->dim[2];
+        const int b = A->dim[3];
+
+        auto node = std::make_shared<NodeBackProp>("Min", batch, channels, a, b, 1);
+        node->inputs = {A,B};
+        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (node->total+tpb-1)/tpb;
+        float* mask;
+        SafeCudaMalloc("MasK", mask, node->total);
+        node->forward = [=]()
+        {
+            //isNan(A); //isNan(B);
+            minKernel<<<bpg,tpb>>>(A->output, B->output,mask,nullptr, nullptr,node->output, node->total);
+            //CheckError("Min forward");
+        };
+
+        node->backward = [=]()
+        {
+            minKernel<<<bpg,tpb>>>(A->output, B->output,mask, A->grad, B->grad, node->grad, node->total,1);
+            //CheckError("Add forward");
+        };
+
+        node->free = [=]()
+        {
+            cudaFree(mask);
+            node->clear();
+        };
+        node->zero_grad = [=](){Zerograd(node);};
+
+        
+        return node;
+}
+
+graph GraphOperations::Max(const graph& A, const graph& B)
+    {
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in Add \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0];
+        const int channels = A->dim[1];
+        const int a = A->dim[2];
+        const int b = A->dim[3];
+
+        auto node = std::make_shared<NodeBackProp>("Max", batch, channels, a, b, 1);
+        node->inputs = {A,B};
+        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (node->total+tpb-1)/tpb;
+        float* mask;
+        SafeCudaMalloc("MasK", mask, node->total);
+        node->forward = [=]()
+        {
+            //isNan(A); //isNan(B);
+            maxKernel<<<bpg,tpb>>>(A->output, B->output,mask,nullptr, nullptr,node->output, node->total);
+            //CheckError("Min forward");
+        };
+
+        node->backward = [=]()
+        {
+            maxKernel<<<bpg,tpb>>>(A->output, B->output,mask, A->grad, B->grad, node->grad, node->total,1);
+            //CheckError("Add forward");
+        };
+
+        node->free = [=]()
+        {
+            cudaFree(mask);
+            node->clear();
+        };
+        node->zero_grad = [=](){Zerograd(node);};
+
+        
+        return node;
+}
 
 graph GraphOperations::Transpose(const graph& X)
 {
@@ -1361,7 +1300,7 @@ graph GraphOperations::Last(const graph& X)
     return node;
     }
 
-graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& target)
+graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& target, const bool last)
 {   
     bool val = true;
     for(int i = 0; i < 4; ++i) {if (prediction->dim[i] != target->dim[i]) {val = false;}}
@@ -1377,7 +1316,7 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
     const int channels = target->dim[1];
     const int c = target->dim[2];
     const int d = target->dim[3];
-    auto node = std::make_shared<NodeBackProp>("MSE Loss",1,1,1,1,1);
+    auto node = std::make_shared<NodeBackProp>("MSE",1,1,1,1,1);
     node->inputs = {prediction, target};
     GB += (double)(prediction->total + target->total + 1) * sizeof(float) / (pow(2,30));
     const int tpb = THREADSPERBLOCK;
@@ -1398,7 +1337,8 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
     
     node->backward = [=]()
     {   
-        deriv_MSE<<<bpg,tpb>>>(prediction->output, target->output, prediction->grad, batch, c, d, target->total); 
+        if(last) deriv_MSE<<<bpg,tpb>>>(prediction->output, target->output,nullptr,prediction->grad, batch, c, d, target->total, true);
+        else  deriv_MSE<<<bpg,tpb>>>(prediction->output, target->output, node->grad,prediction->grad, batch, c, d, target->total, false);
         //isNan(prediction, 1);
         //CheckError("derivative of MSE in MSE backward");
     };
@@ -1408,7 +1348,42 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
     return node;
 }
 
-graph GraphOperations::CrossEntropy(const graph& prediction, const graph& target)
+graph GraphOperations::MeanSquaredError(const graph& prediction, const float& target, const int& target_idx, const bool last)
+{   
+    if(target_idx < 0 || target_idx >= prediction->dim[3])
+    {
+        std::cout << "Target index out of bounds in MSE with scalar target \n";
+        std::cout << "Received target_idx: " << target_idx << ", prediction dim[3]: " << prediction->dim[3] << "\n";
+        std::exit(1);
+    }
+
+    auto node = std::make_shared<NodeBackProp>("MSE",1,1,1,1,1);
+    node->inputs = {prediction};
+    GB += (double)(prediction->total) * sizeof(float) / (pow(2,30));
+
+    node->forward = [=]()
+    {   
+        float value = ReadValueAt(prediction, target_idx);
+        loss = (value - target) * (value - target);
+    };   
+    node->backward = [=]()
+    {   
+        float value = ReadValueAt(prediction, target_idx);
+        
+        cudaMemset(prediction->grad, 0, prediction->total * sizeof(float));
+        if(last) WriteValueAt(prediction, 2.0f * (value - target), target_idx);
+        else 
+        {
+            float grad = ReadValueAt(node, target_idx, true);
+            WriteValueAt(prediction, 2.0f * (value - target) * grad, target_idx);
+        }
+    };
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){}; 
+    return node;
+}
+
+graph GraphOperations::CrossEntropy(const graph& prediction, const graph& target, const bool last)
 {   
         bool val = true;
         for(int i = 0; i < 4; ++i) 
@@ -1450,17 +1425,49 @@ graph GraphOperations::CrossEntropy(const graph& prediction, const graph& target
 
         node->backward = [=]()
         {   
-            deriv_CE<<<bpg,tpb>>>(prediction->output, target->output, prediction->grad, batch, c, d, target->total); 
+            if(last) deriv_CE<<<bpg,tpb>>>(prediction->output, target->output,nullptr, prediction->grad, batch, c, d, target->total, true);
+            else deriv_CE<<<bpg,tpb>>>(prediction->output, target->output, node->grad, prediction->grad, batch, c, d, target->total,false);
             //isNan(prediction, 1);
             //CheckError("derivative of CE in CE backward");
         };
 
         node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd("Node", node->output, node->total);};
+        node->zero_grad = [=](){Zerograd(node);};
         return node;
     }
 
-graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph& target)
+graph GraphOperations::Entropy(const graph& X)
+{
+    const int batch = X->dim[0];
+    const int channels = X->dim[1];
+    const int a = X->dim[2];
+    const int b = X->dim[3];
+
+    auto node = std::make_shared<NodeBackProp>("Entropy", batch, channels, a, b, 1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+
+    node->forward = [=]()
+    {
+        //isNan(X);
+        vectorE<<<bpg,tpb>>>(X->output,nullptr,node->output, node->total);
+        //CheckError("Exp forward");
+    };
+
+    node->backward = [=]()
+    {
+        vectorE<<<bpg,tpb>>>(X->output, node->grad, X->grad, node->total,1);
+        //CheckError("Exp Backward");
+    };
+
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
+
+graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph& target, const bool last)
 {   
         bool val = true;
         for(int i = 0; i < 4; ++i) {if (prediction->dim[i] != target->dim[i]) {val = false;}}
@@ -1478,19 +1485,21 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         const int d = target->dim[3];
         auto node = std::make_shared<NodeBackProp>("SoftMaxCrossEntropy Loss",batch,channels,c,d,1);
         node->inputs = {prediction, target};
-        float* softmax_arr, *maxArr;
-        SafeCudaMalloc("Softmax array", softmax_arr, batch*d);
-        SafeCudaMalloc("Max array", maxArr, batch*d);
+        float* softmax_arr, *maxArr, *softmax;
+        SafeCudaMalloc("Softmax array", softmax_arr, batch*channels*c);
+        SafeCudaMalloc("Max array", maxArr, batch*channels*c);
+        SafeCudaMalloc("SoftMax", softmax, node->total);
         GB += (double)(node->total + 1) * sizeof(float) / (pow(2,30));
         const int tpb = THREADSPERBLOCK;
         const int bpg = (prediction->total+tpb-1) / tpb;
+        
         node->forward = [=]()
         {   
             if(calculate_loss)
             {
                 //isNan(prediction); //isNan(target);
-                SoftMax(prediction->output,softmax_arr, node->grad, maxArr, batch,c,d,0);
-                scalarCE<<<(prediction->total+tpb-1)/tpb,tpb>>>(node->grad,target->output,node->output,batch,prediction->total);
+                SoftMax(prediction->output,softmax_arr, softmax, maxArr, batch,channels,c,d,0);
+                scalarCE<<<(prediction->total+tpb-1)/tpb,tpb>>>(softmax,target->output,node->output,batch,prediction->total);
                 ScaleValue(node->output, (float)batch,1,1);
                 isNan(node);
                 CheckError("Scalar SCE in SCE forward");
@@ -1502,6 +1511,7 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         node->backward = [=]()
         {   
             ScaleAdd<<<bpg,tpb>>>(node->grad, target->output, prediction->grad,-1.0f, target->total);
+            if(!last) mulKernel<<<bpg,tpb>>>(prediction->grad, node->grad, prediction->grad, prediction->total);
             ScaleValue(prediction->grad, batch, prediction->total, 1);
             //isNan(prediction, 1);
             //CheckError("derivative of CE in CE backward");
@@ -1510,6 +1520,7 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         node->free = [=]()
         {
             node->clear();
+            cudaFree(softmax);
             cudaFree(softmax_arr);
             cudaFree(maxArr);
         };
@@ -1519,91 +1530,81 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         return node;
     }
 
-graph GraphOperations::BMM(const graph& A, const graph& B) // m x n, n x p = m x p
-    {
-        if(A->dim[0] != B->dim[0] || A->dim[3] != B->dim[2] || A->dim[1] != 1 || B->dim[1] != 1){
-        if (A->dim[1] != 1 || B->dim[1] != 1){
-            std::cout << "BMM currently only supports A and B with shape [batch, 1, a, b] and [batch, 1, b, c] respectively \n";}
-            std::cout << "Dimension mismatch in BMM \n";
-            Dimension(A);
-            Dimension(B);
-            std::exit(1);
-        }
-
-
-        const int batch = A->dim[0];
-        const int m = A->dim[2];
-        const int n = A->dim[3];
-        const int p = B->dim[3];
-
-        auto node = std::make_shared<NodeBackProp>("BMM", batch, 1, m, p, 1);
-        node->inputs = {A,B};
-        GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
-        const int tpb = THREADSPERBLOCK;
-        const int bpg = (node->total+tpb-1)/tpb;
-        dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        dim3 grid2((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        
-        node->forward = [=]()
-        {   
-            //isNan(A); //isNan(B);
-            bmm<<<grid, block>>>(A->output, B->output, node->output,batch,m,n,p); //Assignment
-            //CheckError("BMM... A * B in GraphOperations BMM forward");
-        };
-
-        node->backward = [=]()
-        {
-            bmmABT<<<grid, block>>>(node->grad, B->output, A->grad, batch, m, p, n,1); // ∂A = ∂Z * B^T
-            //CheckError("BMM.. ∂A = ∂Z * B^T in GraphOperations BMM backward");
-
-            bmmATB<<<grid2, block>>>(A->output, node->grad, B->grad,batch, m, n, p,1); // ∂B = A^T * ∂Z
-            //CheckError("MatMul... X^T*∂Z in GraphOperations BMM backward");
-        };
-        
-        node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd(node);};
-        return node;
-    }
-
-graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n, p x n = m x p
-    {
-        if(A->dim[0] != B->dim[0] || A->dim[3] != B->dim[3] || A->dim[1] != 1 || B->dim[1] != 1){
-    if (A->dim[1] != 1 || B->dim[1] != 1){ std::cout << "BMM is only made to support A and B with shape [batch, 1, a, b] and [batch, 1, b, c] respectively \n";}
+graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m x p
+{
+    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[3] != B->dim[2])
+     {
         std::cout << "Dimension mismatch in BMM \n";
         Dimension(A);
         Dimension(B);
         std::exit(1);
     }
 
-        const int batch = A->dim[0];
-        const int m = A->dim[2];
-        const int n = A->dim[3];
-        const int p = B->dim[2];
+    const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[3];
+    auto node = std::make_shared<NodeBackProp>("BMM", batch, channels, m, p, 1);
+    node->inputs = {A,B};
+    GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);   
+    dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    node->forward = [=]()
+    {   
+        //isNan(A); //isNan(B);
+        bcmm<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); //Assignment
+        //CheckError("BMM... A * B in GraphOperations BMM forward");
+    };
 
-        auto node = std::make_shared<NodeBackProp>("BMMABT", batch, 1, m, p, 1);
+    node->backward = [=]()
+    {
+        bcmmABT<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n,1); // ∂A = ∂Z * B^T
+        //CheckError("BMM.. ∂A = ∂Z * B^T in GraphOperations BMM backward");
+
+        bcmmATB<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels, m, n, p,1); // ∂B = A^T * ∂Z            //CheckError("MatMul... X^T*∂Z in GraphOperations BMM backward");
+    };
+        
+        node->free = [=](){node->clear();};
+        node->zero_grad = [=](){Zerograd(node);};
+        return node;
+    }
+
+graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n * p x n = m x p
+{
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in BMMABT \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
+
+        auto node = std::make_shared<NodeBackProp>("BMM-ABT", batch, channels, m, p, 1);
         node->inputs = {A,B};
 
         GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for m×n output
-        dim3 grid_dB((n+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for p×n output
+        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
+        dim3 grid_dB((n+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for p×n output
 
         node->forward = [=]()
         {   
             //isNan(A); //isNan(B);
-            bmmABT<<<grid, block>>>(A->output, B->output, node->output,batch,m,n,p); 
+            bcmmABT<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
             //CheckError("BMM... A * B^T in GraphOperations BMMABT forward");
         };
 
         node->backward = [=]()
         {
-            bmm<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, m, p, n, 1);
+            bcmm<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n, 1);
             //CheckError("BMM.. ∂A = ∂C × B in GraphOperations BMMABT backward");
 
-            bmmATB<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, p, m, n, 1);
+            bcmmATB<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, channels, m, p, n, 1);
             //CheckError("BMMABT... ∂C^T × A in GraphOperations BMMABT backward");
         };
     
@@ -1612,47 +1613,41 @@ graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n, p x n =
         return node;
     }
 
-graph GraphOperations::BMMATB(const graph& A, const graph& B) // m x n, m x p = n x p
+graph GraphOperations::BMMATB(const graph& A, const graph& B) // m x n * m x p = n x p
     {
-        if(A->dim[0] != B->dim[0] || A->dim[2] != B->dim[2] || A->dim[1] != 1 || B->dim[1] != 1){
-        if (A->dim[1] != 1 || B->dim[1] != 1)
-        {std::cout << "BMM is only made to support A and B with shape [batch, 1, a, b] and [batch, 1, b, c] respectively \n";}
-
-        std::cout << "Dimension mismatch in BMM \n";
-        Dimension(A);
-        Dimension(B);
-        std::exit(1);
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2])
+        {
+            std::cout << "Dimension mismatch in BMMATB \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
         }
 
-        const int batch = A->dim[0];
-        const int m = A->dim[2];
-        const int n = A->dim[3];
-        const int p = B->dim[3];
+        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[3];
 
-
-        auto node = std::make_shared<NodeBackProp>("BMMATB", batch, 1, n, p, 1);
+        auto node = std::make_shared<NodeBackProp>("BMMATB", batch, channels, n, p, 1);
         node->inputs = {A,B};
         GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for m×n output
-        dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for m×p output
+        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
+        dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×p output
 
         node->forward = [=]()
         {   
             //isNan(A); //isNan(B);
-            bmmATB<<<grid, block>>>(A->output, B->output, node->output,batch,m,n,p); 
+            bcmmATB<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
             //CheckError("BMM... A^T * B in GraphOperations BMMATB forward");
         };
 
         node->backward = [=]()
         {
 
-            bmmABT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, m, p, n, 1);
+            bcmmABT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, channels, m, p, n, 1);
             //CheckError("BMM.. ∂A = B × ∂C^T in GraphOperations BMMATB backward");
 
-            bmm<<<grid_dB, block>>>(A->output, node->grad, B->grad, batch, m, n, p, 1);
+            bcmm<<<grid_dB, block>>>(A->output, node->grad, B->grad, batch, channels, m, n, p, 1);
             //CheckError("BMM... ∂B = A × ∂C in GraphOperations BMMATB backward");
         };
 
@@ -1661,44 +1656,39 @@ graph GraphOperations::BMMATB(const graph& A, const graph& B) // m x n, m x p = 
         return node;
     }
 
-graph GraphOperations::BMMATBT(const graph& A, const graph& B) // m x n, p x m = n x p
+graph GraphOperations::BMMATBT(const graph& A, const graph& B) // m x n * p x m = n x p
 {
-        if(A->dim[0] != B->dim[0] || A->dim[2] != B->dim[3] || A->dim[1] != 1 || B->dim[1] != 1){
-        if (A->dim[1] != 1 || B->dim[1] != 1){
-            std::cout << "BMM is only made to support A and B with shape [batch, 1, a, b] and [batch, 1, b, c] respectively \n";}
-            std::cout << "Dimension mismatch in BMM \n";
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in BMMATBT \n";
             Dimension(A);
             Dimension(B);
             std::exit(1);
         }
         
-        const int batch = A->dim[0];
-        const int m = A->dim[2];
-        const int n = A->dim[3];
-        const int p = B->dim[2];
-
-        auto node = std::make_shared<NodeBackProp>("BMMATBT", batch, 1, n, p, 1);
+        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
+        auto node = std::make_shared<NodeBackProp>("BMM-ATBT", batch, channels, n, p, 1);
         node->inputs = {A,B};
         GB += (double)(node->total) * sizeof(float) / (pow(2,30));
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for m×n output
-        dim3 grid_dB((m+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch);  // for p×m output
+        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
+        dim3 grid_dB((m+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for p×m output
 
         node->forward = [=]()
         {   
             //isNan(A); //isNan(B);
-            bmmATBT<<<grid, block>>>(A->output, B->output, node->output,batch,m,n,p); 
+            bcmmATBT<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
             //CheckError("BMM... A^T * B^T in GraphOperations BMMATBT forward");
         };
 
         node->backward = [=]()
         {
-            bmmATBT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, p, m, n, 1);
+            bcmmATBT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, channels, p, m, n, 1);
             //CheckError("BMM.. ∂A = B^T × ∂C^T in GraphOperations BMMATBT backward");
         
-            bmmATB<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, n, p, m, 1);
+            bcmmATBT<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, channels, n, p, m, 1);
             //CheckError("BMMATBT... ∂C^T × A^T in GraphOperations BMMATBT backward");
         };
     
@@ -1709,20 +1699,12 @@ graph GraphOperations::BMMATBT(const graph& A, const graph& B) // m x n, p x m =
     
 graph GraphOperations::SOFTMAX(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
 {
-        const int a = X->dim[0]; const int b = X->dim[1];    
-        const int c = X->dim[2]; const int d = X->dim[3];
-        if (b != 1)
-        {
-            std::cout << "Softmax currently only supports b=1 \n";
-            Dimension(X);
-            std::exit(1);
-        }
-
-        auto node = std::make_shared<NodeBackProp>("Softmax", a,b,c,d, 1);
+        const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+        auto node = std::make_shared<NodeBackProp>("Softmax", a, b,c,d, 1);
         node->inputs = {X};    
         GB += (double)node->total * sizeof(float) / (pow(2,30));
-        const int arr_size = (type == 0) ? a*c : a*d;
-        const int max_size = (type == 0) ? c : d;
+        const int arr_size = (type == 0) ? a*b*c : a*b*d;
+        const int max_size = (type == 0) ? a*b*c : a*b*d;
         float *arr, *maxArr;
         SafeCudaMalloc("Softmax array", arr, arr_size);
         SafeCudaMalloc("Max array", maxArr, max_size);
@@ -1730,14 +1712,14 @@ graph GraphOperations::SOFTMAX(const graph& X, const int type) // type 0: row-wi
         node->forward = [=]() 
         {   
             //isNan(X);
-            SoftMax(X->output, arr, node->output, maxArr, a, c, d, type);
+            SoftMax(X->output, arr, node->output, maxArr, a,b,c, d, type);
             //CheckError("Softmax forward");
 
         };
 
         node->backward = [=]() 
         {
-            deriv_SoftMax(node->output,node->grad,X->grad,a,c,d,type);
+            deriv_SoftMax(node->output,node->grad,X->grad,a,b,c,d,type);
             //CheckError("Deriv Softmax in Softmax");
             //isNan(X, 1);
         };
@@ -1756,57 +1738,66 @@ graph GraphOperations::SOFTMAX(const graph& X, const int type) // type 0: row-wi
 
 graph GraphOperations::SOFTMASK(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
 {
-        const int a = X->dim[0]; const int b = X->dim[1];    
-        const int c = X->dim[2]; const int d = X->dim[3];
-        if (b != 1)
-        {
-            std::cout << "Softmask currently only supports b=1 \n";
-            Dimension(X);
-            std::exit(1);
-        }
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    auto node = std::make_shared<NodeBackProp>("Softmask", a,b,c,d, 1);
+    node->inputs = {X};    
+    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    const int arr_size = (type == 0) ? a*b*c : a*b*d;
+    const int max_size = (type == 0) ? a*b*c : a*b*d;
+    float* arr, *maxArr;
+    SafeCudaMalloc("Softmask array", arr, arr_size);
+    SafeCudaMalloc("Max array", maxArr, max_size);
 
-        auto node = std::make_shared<NodeBackProp>("Softmask", a,b,c,d, 1);
-        node->inputs = {X};    
-        GB += (double)node->total * sizeof(float) / (pow(2,30));
-        const int arr_size = (type == 0) ? a*c : a*d;
-        const int max_size = (type == 0) ? c : d;
-        float* arr, *maxArr;
-        SafeCudaMalloc("Softmask array", arr, arr_size);
-        SafeCudaMalloc("Max array", maxArr, max_size);
+    node->forward = [=]() 
+    {   
+        //isNan(X);
+        SoftMask(X->output, arr, node->output, maxArr, a, b, c, d, type);
+         //CheckError("Softmask forward");
+    };
 
-        node->forward = [=]() 
-        {   
-            //isNan(X);
-            SoftMask(X->output, arr, node->output, maxArr, a, c, d, type);
-            //CheckError("Softmask forward");
-        };
+    node->backward = [=]() 
+    {
+        deriv_SoftMax(node->output, node->grad, X->grad,a, b, c, d, type);
+        //CheckError("Deriv Softmask in Softmask");
+        //isNan(X, 1);
+    };
 
-        node->backward = [=]() 
-        {
-            deriv_SoftMax(node->output, node->grad, X->grad,a,c,d,type);
-            //CheckError("Deriv Softmask in Softmask");
-            //isNan(X, 1);
-        };
-
-        node->free =  [=]()
-        {
-            node->clear();
-            cudaFree(arr);
-            cudaFree(maxArr);
-        };
+    node->free =  [=]()
+    {
+        node->clear();
+        cudaFree(arr);
+        cudaFree(maxArr);
+    };
         
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+
+}
+
+graph GraphOperations::GatherAction(const graph& X, const graph& actions) // Actions is a no grad function
+{
+    if(X->dim[0] != actions->dim[0] || X->dim[1] != 1 || X->dim[1] != actions->dim[1] || X->dim[2] != 1 ||  X->dim[2] != actions->dim[2] || actions->dim[3] != 1)  
+    {
+        printf("Dimension mismatch, expected (%i x 1 x 1 x col) and (%i x 1 x 1 x 1)... Received: \n", X->dim[0], actions->dim[0]);
+        Dimension(X); Dimension(actions);
+        std::exit(1);
+    } 
+        const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+        auto node = std::make_shared<NodeBackProp>("Gathering "+X->op_name+" Actions",a,1,1,1,1);
+        node->inputs = {X,actions};    
+        GB += (double)node->total * sizeof(float) / (pow(2,30));
+        node->forward = [=]() {getactionKernel<<<a,1>>>(X->output, actions->output, node->output,c,a,false);};
+        node->backward = [=](){getactionKernel<<<a,1>>>(node->grad, actions->output, X->grad,c,a,true);};
+        node->free =  [=](){node->clear();};
         node->zero_grad = [=](){Zerograd(node);};
         return node;
 
-    }
+
+};
 
 graph GraphOperations::Scale(const graph& input, const float scale)
 {
-
-    const int a = input->dim[0];
-    const int b = input->dim[1];
-    const int c = input->dim[2];
-    const int d = input->dim[3];
+    const int a = input->dim[0], b = input->dim[1], c = input->dim[2], d = input->dim[3];
     auto node = std::make_shared<NodeBackProp>("Scale", a,b,c,d, 1);
     node->inputs = {input};    
     GB += (double)node->total * sizeof(float) / (pow(2,30));
@@ -1836,11 +1827,7 @@ graph GraphOperations::Scale(const graph& input, const float scale)
 
 graph GraphOperations::RELU(const graph& input)
 {
-
-    const int a = input->dim[0];
-    const int b = input->dim[1];
-    const int c = input->dim[2];
-    const int d = input->dim[3];
+    const int a = input->dim[0], b = input->dim[1], c = input->dim[2], d = input->dim[3];
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("ReLU", a,b,c,d, 1);
     node->inputs = {input};    
@@ -1849,7 +1836,7 @@ graph GraphOperations::RELU(const graph& input)
     node->forward = [=]() 
     {   
         //isNan(input);
-        ReLU<<<(node->total+tpb-1)/tpb,tpb>>>(input->output,node->output, a*b*c*d); // Assignment operation
+        ReLU<<<(node->total+tpb-1)/tpb,tpb>>>(input->output,node->output, node->total); // Assignment operation
         //CheckError("RELU in RELU forward");
 
     };
@@ -1871,11 +1858,7 @@ graph GraphOperations::RELU(const graph& input)
 
 graph GraphOperations::SILU(const graph& input)
 {
-
-    const int a = input->dim[0];
-    const int b = input->dim[1];
-    const int c = input->dim[2];
-    const int d = input->dim[3];
+    const int a = input->dim[0], b = input->dim[1], c = input->dim[2], d = input->dim[3];
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("SiLU", a,b,c,d, 1);
     node->inputs = {input};    
@@ -1894,6 +1877,76 @@ graph GraphOperations::SILU(const graph& input)
         deriv_SiLU<<<(node->total+tpb-1)/tpb,tpb>>>(input->output, node->grad,input->grad,node->total);
         //CheckError("Deriv ReLU in RELU");
         //isNan(input, 1);
+    };
+
+    node->free =  [=](){node->clear();};
+
+    node->zero_grad = [=](){Zerograd(node);};
+
+    
+    return node; 
+}
+
+graph GraphOperations::TANH(const graph& input)
+{
+
+    const int a = input->dim[0];
+    const int b = input->dim[1];
+    const int c = input->dim[2];
+    const int d = input->dim[3];
+    const int tpb = THREADSPERBLOCK;
+    auto node = std::make_shared<NodeBackProp>("Sigmoid", a,b,c,d, 1);
+    node->inputs = {input};    
+    GB += (double)node->total * sizeof(float) / (pow(2,30));
+
+    node->forward = [=]() 
+    {   
+        //isNan(input);
+        TaNH<<<(node->total+tpb-1)/tpb,tpb>>>(input->output,node->output, node->total); // Assignment operation
+        //CheckError("RELU in RELU forward");
+
+    };
+
+    node->backward = [=]() 
+    {
+        deriv_TaNH<<<(node->total+tpb-1)/tpb,tpb>>>(input->output, node->grad,input->grad,node->total);
+        //CheckError("Deriv ReLU in RELU");
+        //isNan(input,1);
+    };
+
+    node->free =  [=](){node->clear();};
+
+    node->zero_grad = [=](){Zerograd(node);};
+
+    
+    return node; 
+    }
+
+graph GraphOperations::SIGMOID(const graph& input)
+{
+
+    const int a = input->dim[0];
+    const int b = input->dim[1];
+    const int c = input->dim[2];
+    const int d = input->dim[3];
+    const int tpb = THREADSPERBLOCK;
+    auto node = std::make_shared<NodeBackProp>("Sigmoid", a,b,c,d, 1);
+    node->inputs = {input};    
+    GB += (double)node->total * sizeof(float) / (pow(2,30));
+
+    node->forward = [=]() 
+    {   
+        //isNan(input);
+        Sigmoid<<<(node->total+tpb-1)/tpb,tpb>>>(input->output,node->output, node->total); // Assignment operation
+        //CheckError("RELU in RELU forward");
+
+    };
+
+    node->backward = [=]() 
+    {
+        deriv_Sigmoid<<<(node->total+tpb-1)/tpb,tpb>>>(input->output, node->grad,input->grad,node->total);
+        //CheckError("Deriv ReLU in RELU");
+        //isNan(input,1);
     };
 
     node->free =  [=](){node->clear();};
@@ -1954,71 +2007,57 @@ graph GraphOperations::CopyCrop(const graph& input1, const graph& input2) // @Ch
         const int tpb = THREADSPERBLOCK;
         auto node = std::make_shared<NodeBackProp>("CopyNCrop", batch,input1->dim[1] + depth,a,b,1);
         node->inputs = {input1, input2};
-        if (a1 != a || b1 != b)
+        float *temp, *tGrad; 
+        const bool condition = (a1 != a || b1 != b);
+
+        if (condition)
         {
-            float *temp, *tGrad; 
             GB += 3 * (double)(node->total) * sizeof(float) / (pow(2,30));
             SafeCudaMalloc("Temp of CopyCrop", temp, batch * depth * a * b);
             SafeCudaMalloc("TGrad of CopyCrop",tGrad, batch * depth * a * b);
-            node->forward = [=]()
-            {   
-                //isNan(input1); //isNan(input2);
-                CopynCrop<<<(tpb+input1->total-1)/tpb, tpb>>>(input1->output, temp, batch, d1,a1,b1,a,b); //Assignment
-                //CheckError("CopynCrop in CopynCrop");
-
-                BConcatenate<<<(tpb+node->total-1)/tpb,tpb>>>(temp,input2->output,node->output,batch,d1,depth,a,b); //Assignment
-                //CheckError("Concatenation in CopynCrop");
-                
-            };
-
-            node->backward= [=]()
-            {
-                
-                BSplit<<<(tpb+node->total-1)/tpb, tpb>>>(tGrad,input2->grad,node->grad,batch,d1,depth,a,b);
-                //CheckError("Split in CopyCrop");
-                
-                PaddingCrop<<<(tpb+input1->total-1)/tpb, tpb>>>(tGrad, input1->grad,batch,d1,a1,b1,a,b);
-                //CheckError("PaddingCrop in CopynCrop");
-                //isNan(input1, 1); //isNan(input2, 1);
-            };  
-
-            node->free = [=]()
-            {
-                node->clear();
-                cudaFree(temp);
-                cudaFree(tGrad);
-            };
-
-            node->zero_grad = [=]()
-            {
-                Zerograd(node);
-                Zerograd("TGrad", tGrad, batch*depth*a*b);
-            };
-        }
-         
-        else
-        {
-            GB += 2 * (double)(node->total) * sizeof(float) / (pow(2,30));
-            node->forward = [=]()
-            {
-                //isNan(input1); //isNan(input2);
-                BConcatenate<<<(tpb+node->total-1)/tpb,tpb>>>(input1->output,input2->output,node->output,batch,d1,depth,a,b);
-                //CheckError("Concatenation in CopyCrop");
-            };
-            
-            node->backward= [=]()
-            {
-                
-                BSplit<<<(tpb+node->total-1)/tpb, tpb>>>(input1->grad,input2->grad,node->grad,batch,d1,depth,a,b);
-                //CheckError("Split in CopyNCrop");
-                //isNan(input1, 1);//isNan(input2, 1);
-            };
-
-            node->free = [=](){node->clear();};
-
-            node->zero_grad = [=](){Zerograd(node);};
         }
         
+        else{GB += (double)(node->total) * sizeof(float) / (pow(2,30));}
+
+        node->forward = [=]()
+        {   
+        //isNan(input1); //isNan(input2);
+        if(condition)
+        {
+            CopynCrop<<<(tpb+input1->total-1)/tpb, tpb>>>(input1->output, temp, batch, d1,a1,b1,a,b); //Assignment
+            Channel_Concat<<<(tpb+node->total-1)/tpb,tpb>>>(temp,input2->output,node->output,batch,d1,depth,a,b); //Assignment
+            //CheckError("Concatenation in CopynCrop");
+        }
+        else{Channel_Concat<<<(tpb+node->total-1)/tpb,tpb>>>(input1->output,input2->output,node->output,batch,d1,depth,a,b);}  
+
+        };
+
+        node->backward= [=]()
+        {        
+            if(condition)
+            { 
+            Channel_Split<<<(tpb+node->total-1)/tpb, tpb>>>(tGrad, input2->grad,node->grad,batch,d1,depth,a,b);
+            PaddingCrop<<<(tpb+input1->total-1)/tpb, tpb>>>(tGrad, input1->grad,batch,d1,a1,b1,a,b);
+            }
+            else
+            {
+                Channel_Split<<<(tpb+node->total-1)/tpb, tpb>>>(input1->grad,input2->grad,node->grad,batch,d1,depth,a,b);
+            }
+            //CheckError("Backward CopynCrop");
+            //isNan(input1, 1); //isNan(input2, 1);
+        };  
+
+        node->free = [=]()
+        {
+            node->clear();
+            if(condition){cudaFree(temp);cudaFree(tGrad);}
+        };
+
+        node->zero_grad = [=]()
+        {
+            Zerograd(node);
+            if (condition) Zerograd("TGrad", tGrad, batch*depth*a*b);
+        };        
         
         return node;
     }
@@ -2035,7 +2074,7 @@ graph GraphOperations::CopyConcat(const graph& input1, const graph& input2) // @
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("CopyConcat", batch,depth,a,b+b1,1);
     node->inputs = {input1, input2};
-    if (d1 != depth || a1 != a)
+    if (batch != input1->dim[0] || d1 != depth || a1 != a)
     {
             std::cout << "CopyConcat currently only supports concatenation of tensors with the same channels and rowshape \n";
             Dimension(input1);
@@ -2047,13 +2086,13 @@ graph GraphOperations::CopyConcat(const graph& input1, const graph& input2) // @
     node->forward = [=]()
     {   
             //isNan(input1); //isNan(input2);
-            CConcatenate<<<(tpb+node->total-1)/tpb,tpb>>>(input1->output,input2->output,node->output,batch,d1,a,b1,b);
+            Column_Concat<<<(tpb+node->total-1)/tpb,tpb>>>(input1->output,input2->output,node->output,batch,d1,a,b1,b);
             //CheckError("Concatenation in CopyConcat");
     };
 
     node->backward= [=]()
     {
-        CSplit<<<(tpb+node->total-1)/tpb, tpb>>>(input1->grad,input2->grad,node->grad,batch,d1,a,b1,b);
+        Column_Split<<<(tpb+node->total-1)/tpb, tpb>>>(input1->grad,input2->grad,node->grad,batch,d1,a,b1,b);
         //CheckError("Split in CopyConcat");
         //isNan(input1, 1);//isNan(input2, 1);
     };
@@ -2094,7 +2133,7 @@ graph GraphOperations::VecConcat(const graph_tree& inputs)
         for (int i=0; i< inputs.size(); i++)
         {
         
-        VConcatenate<<<(inputs[i]->total+tpb-1)/tpb,tpb>>>(inputs[i]->output,node->output,batch,
+        Vector_Concat<<<(inputs[i]->total+tpb-1)/tpb,tpb>>>(inputs[i]->output,node->output,batch,
         depth,a,inputs[i]->dim[3],total_b,col_offset);
         //CheckError("Concatenation in VecConcat");
         col_offset += inputs[i]->dim[3];
@@ -2107,7 +2146,7 @@ graph GraphOperations::VecConcat(const graph_tree& inputs)
         for(int i = inputs.size()-1; i >= 0; --i)
         {
             
-            VSplit<<<(inputs[i]->total+tpb-1)/tpb,tpb>>>(node->grad,inputs[i]->grad,batch,
+            Vector_Split<<<(inputs[i]->total+tpb-1)/tpb,tpb>>>(node->grad,inputs[i]->grad,batch,
             depth,a,inputs[i]->dim[3],total_b,col_offset);
             col_offset += inputs[i]->dim[3];
         }
@@ -2123,12 +2162,43 @@ graph GraphOperations::VecConcat(const graph_tree& inputs)
     return node;
 }
 
+graph GraphOperations::LAYERMEAN(const graph& X)
+{
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    const int tpb = THREADSPERBLOCK;
+    auto node = std::make_shared<NodeBackProp>("LayerMean", a, 1,1,1,1);
+    node->inputs = {X};    
+    GB += (double)node->total * sizeof(float) / (pow(2,30));
+
+    node->forward = [=]() 
+    {   
+        //isNan(input);
+        LayerMean<<<a,tpb>>>(X->output,node->output,a,b,c,d); // Assignment operation
+        //CheckError("RELU in RELU forward");
+
+    };
+
+    node->backward = [=]() 
+    {
+        LayerMeanGrad<<<(node->total+tpb-1)/tpb,tpb>>>(node->grad, X->grad, a, b, c, d);
+        //CheckError("Deriv ReLU in RELU");
+        //isNan(input,1);
+    };
+
+    node->free =  [=](){node->clear();};
+
+    node->zero_grad = [=](){Zerograd(node);};
+
+    
+    return node; 
+    }
+
 graph GraphOperations::LayerNorm(const graph& X)
 {
     const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
     const float gamma = 1.0f, beta = 0.0f, epsilon = 1e-5f;
     auto node = std::make_shared<NodeBackProp>("LayerNorm",a,b,c,d,1);
-    double *mean, *std, *ggamma_mean, *ggammanode_mean;
+    float *mean, *std, *ggamma_mean, *ggammanode_mean;
     float *ggamma, *ggammanode; 
     const int tpb = THREADSPERBLOCK;
 
@@ -2166,7 +2236,7 @@ graph GraphOperations::LayerNorm(const graph& X)
         ScaleValue(ggamma,gamma,node->total);
         //CheckError("Scale in LNorm Backward");
 
-        Multiply<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma,node->output,ggammanode,node->total);
+        mulKernel<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma,node->output,ggammanode,node->total);
         //CheckError("Multiply");
 
         LayerMean<<<a, tpb>>>(ggamma, ggamma_mean, a,b,c,d, false);
@@ -2198,7 +2268,7 @@ graph GraphOperations::BatchNorm(const graph& X)
     const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("BatchNorm",a,b,c,d,1);
     const float gamma = 1.0f, beta = 0.0f, epsilon = 1e-5f;
-    double *mean, *std, *ggamma_mean, *ggammanode_mean;
+   float *mean, *std, *ggamma_mean, *ggammanode_mean;
     float *ggamma, *ggammanode;
     const int tpb = THREADSPERBLOCK;
     SafeCudaMalloc("BatchNorm ggamma", ggamma, node->total);
@@ -2234,7 +2304,7 @@ graph GraphOperations::BatchNorm(const graph& X)
         ScaleValue(ggamma,gamma, node->total);
         //CheckError("Scale in BNorm Backward");
 
-        Multiply<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
+        mulKernel<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
         //CheckError("Multiply");
 
         BatchMean<<<b,tpb>>>(ggamma, ggamma_mean, a,b,c,d, false);
@@ -2275,8 +2345,7 @@ graph GraphOperations::GroupNorm(const graph& X, const int group)
         
     auto node = std::make_shared<NodeBackProp>("GroupNorm",a,b,c,d,1);
     const float gamma = 1.0f, beta = 0.0f, epsilon = 1e-5f;
-    double *mean, *std, *ggamma_mean, *ggammanode_mean;
-    float *ggamma, *ggammanode;
+    float *mean, *std, *ggamma_mean, *ggammanode_mean, *ggamma, *ggammanode;
     const int tpb = THREADSPERBLOCK;
 
     SafeCudaMalloc("GroupNorm ggamma", ggamma, node->total);
@@ -2314,7 +2383,7 @@ graph GraphOperations::GroupNorm(const graph& X, const int group)
         ScaleValue(ggamma,gamma, node->total);
         //CheckError("Scale in GroupNorm Backward");
 
-        Multiply<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
+        mulKernel<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
         //CheckError("Multiply");
 
         GroupMean<<<a*group,tpb>>>(ggamma, ggamma_mean, a,b,group,c,d,false);
@@ -2346,8 +2415,7 @@ graph GraphOperations::InstanceNorm(const graph & X)
     const float gamma = 1.0f;
     const float beta = 0.0f;
     const float epsilon = 1e-5f;
-    double *mean, *std,*ggamma_mean, *ggammanode_mean;;
-    float *ggamma, *ggammanode;
+    float *mean, *std, *ggamma_mean, *ggammanode_mean, *ggamma, *ggammanode;
     const int tpb = THREADSPERBLOCK;
 
     SafeCudaMalloc("InstanceNorm ggamma", ggamma, node->total);
@@ -2384,7 +2452,7 @@ graph GraphOperations::InstanceNorm(const graph & X)
         ScaleValue(ggamma,gamma,node->total);
         //CheckError("Scale in GroupNorm Backward");
 
-        Multiply<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
+        mulKernel<<<(node->total+tpb-1)/tpb,tpb>>>(ggamma, node->output, ggammanode, node->total);
         //CheckError("Multiply");
 
         InstanceMean<<<a*b,tpb>>>(ggamma, ggamma_mean, a,b,c,d, false);
@@ -2414,10 +2482,24 @@ void GraphOperations::accumulate(double* global_scale)
         Sqrt_Scale<<<1,1>>>(global_scale,1.0f,0);
 }
 
-void GraphOperations::ParameterUpdate() {for(auto&node : nodes) if(node->updateParams) node->updateParams();}
+void GraphOperations::ParameterUpdate() 
+{
+    if (nodes.size() == 0)
+    {
+        printf("Warning... Nodes list is empty and parameter update cannot run.. \n You may have forgotten to topologically sort \n");
+        return;
+    }
+
+    for(auto&node : nodes) if(node->updateParams) node->updateParams();
+}
 
 void GraphOperations::forward() 
 {   
+    if (nodes.size() == 0)
+    {
+        printf("Warning... Nodes list is empty and forward cannot run.. \n You may have forgotten to topologically sort \n");
+        return;
+    }
     for (auto& node : nodes)
     {
         if (node->forward)  
@@ -2427,11 +2509,21 @@ void GraphOperations::forward()
 
 void GraphOperations::backward() 
 {
+    if (nodes.size() == 0)
+    {
+        printf("Warning... Nodes list is empty and bacward cannot run.. \n You may have forgotten to topologically sort \n");
+        return;
+    }
     for(auto it=nodes.rbegin();it!=nodes.rend();++it){if((*it)->backward) (*it)->backward();    } 
 }
 
 void GraphOperations::zero_grad() 
 {
+        if (nodes.size() == 0)
+    {
+        printf("Warning... Nodes list is empty and Zero grad cannot run.. \n You may have forgotten to topologically sort \n");
+        return;
+    }
     for (auto it = nodes.rbegin(); it != nodes.rend(); ++it){   
     if ((*it)->zero_grad)
     {
@@ -2448,86 +2540,22 @@ void GraphOperations::printNodes(const bool display_grad)
     }}
 }
 
-void GraphOperations::clear_graph(){for (auto &node: nodes){if(node->free){node->free();}}nodes.clear();}
-
-DataLoading::DataLoading(TextualEmbedding& embed_ref, const Text& db, const int batch, const int context):
-    embedder(embed_ref), Database(db), batch_size(batch), context_len(context), gen(std::random_device{}())
+void GraphOperations::clear_graph()
 {
-    if(batch > embedder.MAX_BATCH_SIZE || context > embedder.MAX_CONTEXT_LEN){
-        printf("Cannot load data for batches or context > embedders construct");
-        printf("Requested (batch, context): (%i, %i), Maximum: (%i, %i)", batch, context, embedder.MAX_BATCH_SIZE, embedder.MAX_CONTEXT_LEN);
+    for (auto &node: nodes)
+    {
+        if(node->free)node->free();
     }
-    dist = std::uniform_int_distribution<int>(0, Database.size() - (context));
+    nodes.clear();
 }
 
-BatchTexts DataLoading::load_data()
+void GraphOperations::clean_clear_graph()
 {
-
-        BatchTexts batch_data;
-        used_indices.clear();
-
-        while (batch_data.encoder.size() < batch_size)
-        {
-            int start_idx = dist(gen);
-            if (used_indices.find(start_idx) != used_indices.end()) continue;
-            used_indices.insert(start_idx);
-            Text encoder_seq, decoder_seq, target_seq;
-            decoder_seq.push_back(START_TOKEN);
-            for (int i = 0; i < context_len; ++i)
-            {
-                encoder_seq.push_back(Database[start_idx + i]);
-                decoder_seq.push_back(Database[start_idx + i]);
-                target_seq.push_back(Database[start_idx + i]);
-            }
-            encoder_seq.push_back(END_TOKEN);
-            target_seq.push_back(END_TOKEN);
-            batch_data.encoder.push_back(encoder_seq);
-            batch_data.decoder.push_back(decoder_seq);
-            batch_data.target.push_back(target_seq);
-        }
-        return batch_data;
-    }
-    
-graph DataLoading::forward(const BatchTexts& dataset, const str type)
-{
-    BatchText data;
-    if (type == "E") data = dataset.encoder; 
-    if (type == "D") data = dataset.decoder; 
-    if (type == "T") data = dataset.target;
-    if (type != "E" && type != "D" && type != "T")
+    for (auto &node: nodes)
     {
-        std::cerr << "Invalid type specified. Use 'E', 'D', or 'T'.\n" << " Current type is " << type << "\n"; 
-        std::exit(1);
+        if(node->free)node->free();
+        if(node->serious_free) node->serious_free();
     }
-
-    const int batch_size = data.size();
-    const int row = data[0].size();
-    const int col = (type != "T") ? embedder.embed_dim : embedder.Vocabulary.size();
-    graph node;
-    if (type == "T")
-    {
-        node = std::make_shared<NodeBackProp>("Target One-Hot", batch_size, 1, row, col,1); 
-        node->inputs = {};
-        node->forward = [=]()
-        {
-            embedder.encodeBatch(data, type);
-            embedder.one_hot_forward(node);
-        };
-        node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd(node);};
-        return node;
-    }
-
-    node = std::make_shared<NodeBackProp>(type + " Embeddings", batch_size, 1, row,col,1);
-    node->inputs = {nullptr};
-    node->forward = [=]()
-    {
-        embedder.encodeBatch(data, type);
-        embedder.forward(node, type);
-    }; 
-    node->free = [=](){node->clear();};
-    node->zero_grad = [=](){Zerograd(node);};
-    return node;
 }
 
 Identity::Identity(GraphOperations& go_ref, const str name) : go(go_ref), name(name) {}
@@ -2561,41 +2589,49 @@ graph Linear::forward(const graph & X)
         }
 
         const int batch = X->dim[0];
+        const int channels = X->dim[1];
         const int row = X->dim[2];
         const int col = X->dim[3];
         const int tpb = THREADSPERBLOCK;
-        auto node = std::make_shared<NodeBackProp>(op_name, batch, 1, row, out, 1);
+        auto node = std::make_shared<NodeBackProp>(op_name, batch, channels, row, out, 1);
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((out+BLOCK_SIZE-1)/BLOCK_SIZE,(row+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
-        dim3 grid2((out+BLOCK_SIZE-1)/BLOCK_SIZE,(col+BLOCK_SIZE-1)/BLOCK_SIZE,batch);
+        dim3 grid((out+BLOCK_SIZE-1)/BLOCK_SIZE,(row+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+        dim3 grid_dA((col+BLOCK_SIZE-1)/BLOCK_SIZE,(row+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);   
+        dim3 grid_dB((out+BLOCK_SIZE-1)/BLOCK_SIZE,(col+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+
         node->inputs = {X};
-        
+
         node->forward = [=]()
         {   
-            bmm<<<grid, block>>>(X->output, W1->output, node->output, batch, row, col, out,0,1,0,1); //Assignment
+            bcmm<<<grid, block>>>(X->output, W1->output, node->output,batch,channels, row, col, out, 0, 3, 0, 3);
             //CheckError("MatMul... X*W1 in Linear Layer forward");
 
-            BCumAdd<<<(tpb+batch*row-1)/tpb, tpb>>>(node->output, B1->output,batch, row, out); //Assignment
+            BCumAdd<<<(tpb+batch*channels*row-1)/tpb, tpb>>>(node->output, B1->output,batch,channels, row, out); 
             //CheckError("Add... X*W1+B1 in Linear Layer forward");
 
         };
 
         node->backward= [=]()
         {
-           
-            bmmABT<<<grid, block>>>(node->grad, W1->output, X->grad, batch, row, out, W1->dim[2], 1,1,0,1);
+            bmmABT<<<grid_dA, block>>>(node->grad, W1->output, X->grad, batch, row, out, col,1,3,0,3);
             //CheckError("MatMul... ∂Z*W^T in Linear Layer backward");
 
-            bmmATB<<<grid2, block>>>(X->output, node->grad, W1->grad,batch,row,X->dim[3],node->dim[3],1,1,1,0);
+            bmmATB<<<grid_dB, block>>>(X->output, node->grad, W1->grad, batch, row, col, out,1,3,3,0);
             //CheckError("MatMul... X^T*∂Z in Linear Layer backward");
 
-            BCompress<<<(tpb+batch*node->dim[2]-1)/tpb, tpb>>>(node->grad, B1->grad, batch, node->dim[2],node->dim[3]);
+            BCompress<<<out, tpb>>>(node->grad, B1->grad, batch, channels, row, out);
             //CheckError("Compress... Squeeze(∂Z)->∂b in Lineary Layer backward");
             
             
         };
         
         node->free = [=](){node->clear();};
+
+        node->serious_free = [=]()
+        {
+            W1->clear();
+            B1->clear();
+        };
 
         node->zero_grad = [=]()
         {
@@ -2695,6 +2731,12 @@ graph Convolute2D::forward(const graph& X)
     
     node->free = [=](){node->clear();};
     
+    node->serious_free = [=]()
+    {
+        weights->clear();
+        bias->clear();
+    };
+
     node->accumulate = [=](double* global_scale)
     {
         weights->accumulate_grad(global_scale);
@@ -2789,6 +2831,12 @@ graph Convolute2DT::forward(const graph& X)
         node->clear();
     };
 
+    node->serious_free = [=]()
+    {
+        weights->clear();
+        bias->clear();
+    };
+
     node->accumulate = [=](double* global_scale)
     {
         weights->accumulate_grad(global_scale);
@@ -2816,111 +2864,6 @@ graph Convolute2DT::forward(const graph& X)
     return node;
 }
 
-VisionAttention::VisionAttention(GraphOperations &go_ref, const int Channels): go(go_ref), channels(Channels)
-{
-        Q = new Convolute2D(subGraph, channels, channels,1,1,1,0, "Q"); 
-        K = new Convolute2D(subGraph, channels, channels,1,1,1,0, "K");
-        V = new Convolute2D(subGraph, channels, channels,1,1,1,0, "V");
-        P = new Convolute2D(subGraph, channels, channels,1,1,1,0, "P");
-    
-
-}
-void VisionAttention::save(std::ofstream& f) const{Q->save(f); K->save(f); V->save(f); P->save(f);}
-void VisionAttention::load(std::ifstream& f){Q->load(f); K->load(f); V->load(f); P->load(f);}
-graph VisionAttention::forward(const graph& X_in)
-{
-    if(X_in->dim[1] != channels)
-    {
-        std::cout << "Shape mismatch in Attention::forward()... Expected: " 
-        << channels << "channels | \t " << " Received: " << X_in->dim[1] << " channels \n";
-    }
-        
-    auto query = Q->forward(X_in);
-    auto key = K->forward(X_in);     
-    auto value = V->forward(X_in);   
-
-    std::vector<int>init = {key->dim[0], key->dim[1], key->dim[2], key->dim[3]};
-    std::vector<int>reshaped = {key->dim[0],1, key->dim[1], key->dim[2]*key->dim[3]};
-    query->reshape(reshaped); key->reshape(reshaped); value->reshape(reshaped);
-    auto pquery = go.Permute(query,0,1,3,2); // batch x seq_len x channels
-    auto pkey = go.Permute(key,0,1,3,2);     // batch x seq_len x channels
-    auto attn_scores = go.BMMABT(pquery,pkey); // batch x seq_len x seq_len
-    auto scaled_attn = go.Scale(attn_scores, 1.0f/sqrtf((float)channels));
-    auto softmax_attn = go.SOFTMAX(scaled_attn, 1); // batch x seq_len x seq_len
-    auto attn_output = go.BMM(softmax_attn,go.Permute(value, 0,1,3,2)); // batch x seq_len x channels
-    auto p_attn_output = go.Permute(attn_output,0,1,3,2); // batch x channels x seq_len
-    p_attn_output->reshape(init);
-    auto project = P->forward(p_attn_output); 
-    auto output = go.Add(X_in, project); output->op_name = "Attention Output";
-    return output;
-}
-
-VisionCrossAttention::VisionCrossAttention(GraphOperations &go_ref,const int Channels, const int ContextLen, const int EmbedDim): 
-go(go_ref), channels(Channels), context_len(ContextLen), embed_dim(EmbedDim)
-{   
-        if(channels != embed_dim)
-        {
-            std::cout << "ERROR: channels (" << channels << ") must equal embed_dim ("<< embed_dim << ") for cross-attention\n";
-            std::exit(1);
-        }
-        Q = new Convolute2D(subGraph, channels,  channels, 1, 1, 1, 0, "Q");
-        K = new Convolute2D(subGraph, embed_dim,embed_dim, 1, 1, 1, 0, "K");
-        V = new Convolute2D(subGraph, embed_dim,embed_dim, 1, 1, 1, 0, "V");
-        P = new Convolute2D(subGraph, channels,  channels, 1, 1, 1, 0, "P");
-}
-void VisionCrossAttention::save(std::ofstream& f) const{Q->save(f); K->save(f); V->save(f); P->save(f);}
-void VisionCrossAttention::load(std::ifstream& f) {Q->load(f); K->load(f); V->load(f); P->load(f);}
-graph VisionCrossAttention::forward(const graph& X_in, const graph& Context)
-{   
-        if(Context == nullptr)
-        {
-            std::cout << "Context node is null in VisionCrossAttention::forward \n";
-            std::exit(1);
-        }
-
-        if(X_in->dim[1] != channels)
-        {
-            std::cout << "Shape mismatch in VisionCrossAttention::forward()... Expected: " << batch << " x " << channels 
-                      << " Received: " << X_in->dim[0] << " x " << X_in->dim[1] << "\n";
-            std::exit(1);
-        }
-
-        if(Context->dim[0] != X_in->dim[0])
-        {
-            std::cout << "Context batch mismatch in AttentionT::forward()\n";
-            std::exit(1);
-        }
-        
-        if(embed_dim != channels)
-        {
-            std::cout << "Embed dim and channels must be equal in VisionCrossAttention::forward()\n";
-            std::exit(1);
-        }
-
-        auto query = Q->forward(Context); // batch x embed dim == channels x seq_len
-        auto key = K->forward(X_in);  // batch x channels x seq_len
-        auto value = V->forward(X_in); // batch x channels x seq_len
-        
-        std::vector<int> init = {key->dim[0], key->dim[1], key->dim[2], key->dim[3]};
-        std::vector<int> reshaped = {key->dim[0],1, key->dim[1], key->dim[2]*key->dim[3]};
-        query->reshape(reshaped); key->reshape(reshaped); value->reshape(reshaped);
-
-        auto pquery = go.Permute(query,0,1,3,2); // batch x seq_len x channels
-        auto pkey = go.Permute(key,0,1,3,2);     // batch x seq_len x channels
-        auto attn_scores = go.BMMABT(pquery,pkey); // batch x seq_len x seq_len
-        auto scaled_attn = go.Scale(attn_scores, 1.0f/sqrtf((float)channels));
-        auto softmax_attn = go.SOFTMAX(scaled_attn, 1); // batch x seq_len x seq_len
-        auto attn_output = go.BMM(softmax_attn,go.Permute(value,0,1,3,2)); // batch x seq_len x channels
-        auto p_attn_output = go.Permute(attn_output,0,1,3,2); // batch x channels x seq_len
-        p_attn_output->reshape(init);
-        auto project = P->forward(p_attn_output);
-        auto output = go.Add(X_in, project); output->op_name = "Cross-Attention Output";
-        return output;
-        
-
-
-}
-
 TimeMLPBlock::TimeMLPBlock(GraphOperations &go_ref, const int t_embed_dim, const int t_hidden): go(go_ref)
 {
     L0 = new Linear(go, t_embed_dim, t_hidden, "Time MLP L0");
@@ -2944,103 +2887,6 @@ void TimeMLPBlock::load(std::ifstream& f)
     L1->load(f);
 }
 
-SingleHeadAttention::SingleHeadAttention(GraphOperations &go_ref, const int embed_dim, const int t_hidden): go(go_ref), embed_dim(embed_dim), type(type), hidden(t_hidden)
-{
-    q = new Linear(go, embed_dim, t_hidden, "Transformer Q");
-    k = new Linear(go, embed_dim, t_hidden, "Transformer K");
-    v = new Linear(go, embed_dim, t_hidden, "Transformer V");
-    out = new Linear(go, t_hidden, embed_dim, "Transformer Output");
-}
-void SingleHeadAttention::save(std::ofstream& f) const
-{
-    q->save(f);
-    k->save(f);
-    v->save(f);
-    out->save(f);
-}
-void SingleHeadAttention::load(std::ifstream& f)
-{
-    q->load(f);
-    k->load(f);
-    v->load(f);
-    out->load(f);
-}   
-graph SingleHeadAttention::forward(const graph&X, const bool mask)
-{
-    auto Q = q->forward(X);
-    auto K = k->forward(X);
-    auto V = v->forward(X);
-    auto scores = go.BMMABT(Q, K);
-    auto scaled_scores = go.Scale(scores, 1.0f / sqrtf((float)(hidden)));
-    auto attn_weights = mask ? go.SOFTMASK(scaled_scores,1): go.SOFTMAX(scaled_scores,1);
-    auto attn_output = go.BMM(attn_weights, V);
-    auto output = out->forward(attn_output);
-    output->op_name = type + "Transformer Block Output";
-    return output;
-}
-graph SingleHeadAttention::cross_forward(const graph& X, const graph& Y)
-{
-/*@author Single Head Cross attention implementation, query from X, key and value from Y*/
-    auto Q = q->forward(X);
-    auto K = k->forward(Y);
-    auto V = v->forward(Y);
-    auto scores = go.BMMABT(Q, K);
-    auto scaled_scores = go.Scale(scores,1.0f/sqrtf((float)(embed_dim)));
-    auto attn_weights =  go.SOFTMASK(scaled_scores,1);
-    auto attn_output = go.BMM(attn_weights, V); 
-    auto output = out->forward(attn_output);
-    output->op_name = " Cross SHA Block Output";
-    return output;
-}
-graph SingleHeadAttention::cached_forward(const graph& X_new, KVCache&cache, const int start_idx, bool mask)
-{ 
-    auto K_new = k->forward(X_new);    
-    auto V_new = v->forward(X_new);
-
-    // Handling Cache Update ======== // Can add MemcpyAsync for SpeedUp;
-    K_new->forward();
-    V_new->forward();
-
-    int offset = cache.current_len * cache.hidden;
-    cudaMemcpy(cache.K+offset,K_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
-    cudaMemcpy(cache.V+offset,V_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
-    cache.current_len += K_new->dim[2];
-
-    K_new->clear();
-    V_new->clear();
-
-    graph K_full = std::make_shared<NodeBackProp>("KV_K",1,1,cache.current_len,cache.hidden,0);
-    graph V_full = std::make_shared<NodeBackProp>("KV_V",1,1,cache.current_len,cache.hidden,0);
-
-    K_full->output = cache.K;
-    V_full->output = cache.V;
-
-    // ============================= // 
-    auto pos    = go.MatrixPositionalEncoding(X_new, start_idx);
-    auto Q_new  = q->forward(pos);
-    auto scores = go.BMMABT(Q_new, K_full);
-    auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)hidden));
-    auto weights = mask ? go.SOFTMASK(scaled, 1) : go.SOFTMAX(scaled, 1);
-    auto attn_out = go.BMM(weights, V_full);
-    auto output = out->forward(attn_out);
-    output->op_name = "SHA Cached Forward";
-    return output;
-}
-graph SingleHeadAttention::cached_cross_forward(const graph& X_new, KVCache& cache)
-{
-    auto Q_new = q->forward(X_new);   
-    graph K_full = std::make_shared<NodeBackProp>("KV_K",1,1,cache.current_len,cache.hidden,0);
-    graph V_full = std::make_shared<NodeBackProp>("KV_V",1,1,cache.current_len,cache.hidden,0);
-    K_full->output = cache.K;
-    V_full->output = cache.V;
-    auto scores = go.BMMABT(Q_new, K_full);
-    auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)hidden));
-    auto weights = go.SOFTMASK(scaled, 1);
-    auto attn_out = go.BMM(weights, V_full);
-    auto output = out->forward(attn_out); output->op_name = "SHA output";
-    return output;
-}
-    
 void Noise(const graph & input)
 {
     std::random_device rd;
@@ -3048,3 +2894,5 @@ void Noise(const graph & input)
     GaussianNoise<<<(input->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(input->output, input->total, seed);
     // CheckError("Addition of Gaussian noise in noise kernel");
 }
+
+
