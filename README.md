@@ -292,6 +292,8 @@ int main()
 ### Activation Functions
 - `GraphOperations.RELU()->forward()`: Rectified Linear Unit
 - `GraphOperations.SILU()->forward()`: Sigmoid Linear Unit
+- `GraphOperations.SIGMOID()->forward()`: Sigmoid function
+- `GraphOperations.TAHN()->forward()`: Hyperbolic tan function
 - More will be added as needed since they are really easy to implement
 
 ### Special Graph Operation Function
@@ -313,8 +315,8 @@ int main()
 ## Performance Optimizations
 
 - **GPU Streams**: Everything is preallocated on the GPU before computation and can easily flow through cuda
-- **Memory Management**: Efficient graph clearing and memory reuse in go.clear_graph();
-- **Asynchronous Execution**: Async optimizations soon to be added
+- **Memory Management**: Efficient graph clearing and memory reuse in go.clear_graph() which preserves parameters, clean_clear_graph()    frees   everything;
+- **Asynchronous Execution**: Async optimizations soon to be added using graph tree
 - **Custom CUDA Kernels**: Optimized all round operations
 
 ## Example Output
