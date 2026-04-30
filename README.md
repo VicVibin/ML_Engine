@@ -19,7 +19,7 @@ A partially complete implementation of a machine learning library that can be us
   - Langevin Sampling
   - Convolutional Blocks, etc
 
-  - **Reinforcement Learning Architecture**: complete DDPM structure with:
+- **Reinforcement Learning Architecture**: complete DDPM structure with:
   - Q-Learning
   - PPO
 
