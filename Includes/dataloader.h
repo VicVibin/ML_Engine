@@ -20,9 +20,20 @@
 #endif
 
 using str = std::string;
-using Text = std::vector<std::string>;
+using Text = std::vector<str>;
+using BatchText = std::vector<Text>;
 
 Text FolderPaths(const std::string& folder, const int filenums);
+
+struct BatchTexts
+{
+    BatchText encoder;
+    BatchText decoder;
+    BatchText target;
+
+    BatchTexts(int batch_size,int clen):encoder(batch_size,Text(clen+1)),decoder(batch_size,Text(clen+1)),target(batch_size,Text(clen+1)){}
+};
+
 
 class TextProcessor {
 public:

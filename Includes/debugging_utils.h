@@ -3,32 +3,32 @@
 #include <string>
 #include <chrono>
 #include <iostream>
+#include <vector>
 
 using str = std::string;
 
 #define XAVIER 6.0f
 #define ADAMW true
 #define NORM 1.0f
-#define LEARNING_RATE 1e-4f
+#define LEARNING_RATE 1e-3f
 #define SHOULDNORM false
 
 template <typename T>
 void printHeadGPU(const str name, T* d_ptr, int start, int elems, int total)
 {
     std::cout << "Printing dimensions for pointer: " <<name << "\n";
-    T* CPU = (T *)malloc(total * sizeof(T));
-    cudaMemcpy(CPU, d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
+    std::vector<T> CPU(total);
+    cudaMemcpy(CPU.data(), d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
     for(int i = start; i < start + elems; ++i){std::cout << CPU[i] << "\t";}
     std::cout << "\n _______________________________ \n";
-    free(CPU);
 
 }
 
 template <typename T>
 void printHeadGPU(const str name, const T* X, const int ch, const int rows, const int cols, const int total)
 {
-    T* CPU = (T *)malloc(total * sizeof(T));
-    cudaMemcpy(CPU, X, total * sizeof(T), cudaMemcpyDeviceToHost);
+    std::vector<T> CPU(total);
+    cudaMemcpy(CPU.data(), d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
 
     std::cout << "Printing dimensions for node " << name << "->output \n";
     for (int c = 0; c < min(3,ch); ++c)
@@ -45,23 +45,21 @@ void printHeadGPU(const str name, const T* X, const int ch, const int rows, cons
         }
         std::cout << "------------------------------\n";
     }
-
-    free(CPU);
 }
 
 template <typename T>
 void printHeadGrad(const str name, const T* X, const int ch, const int rows, const int cols, const int total)
 {
-    T* CPU = (T *)malloc(total * sizeof(T));
-    cudaMemcpy(CPU, X, total * sizeof(T), cudaMemcpyDeviceToHost);
+    std::vector<T> CPU(total);
+    cudaMemcpy(CPU.data(), d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
 
     std::cout << "Printing dimensions for node " << name << "->grad \n";
-    for (int c = 0; c < min_int(3,ch); ++c)
+    for (int c = 0; c < min(3,ch); ++c)
     {
         std::cout << "Channel " << c << ":\n";
-        for (int r = 0; r < min_int(5,rows); ++r)
+        for (int r = 0; r < min(5,rows); ++r)
         {
-            for (int col = 0; col < min_int(5,cols); ++col)
+            for (int col = 0; col < min(5,cols); ++col)
             {
                 int idx = (c * rows * cols) + (r * cols) + col;
                 std::cout << CPU[idx] << "\t";
@@ -71,10 +69,10 @@ void printHeadGrad(const str name, const T* X, const int ch, const int rows, con
         std::cout << "------------------------------\n";
     }
 
-    free(CPU);
 }
 
-auto printMem = [](const char* label) {
+void inline printMem(const char* label) 
+{
     size_t free_mem, total_mem;
     cudaMemGetInfo(&free_mem, &total_mem);
     printf("[%s] GPU free: %.2f MB\n", label, free_mem / 1e6);

@@ -1,4 +1,4 @@
-#include "includes/diffusion.h"
+#include "diffusion.h"
 
 VisionAttention::VisionAttention(GraphOperations &go_ref, const int Channels): go(go_ref), channels(Channels)
 {
@@ -9,7 +9,6 @@ VisionAttention::VisionAttention(GraphOperations &go_ref, const int Channels): g
     
 
 }
-
 void VisionAttention::save(std::ofstream& f) const{Q->save(f); K->save(f); V->save(f); P->save(f);}
 void VisionAttention::load(std::ifstream& f){Q->load(f); K->load(f); V->load(f); P->load(f);}
 graph VisionAttention::forward(const graph& X)
@@ -466,7 +465,12 @@ void U_NET::save(const str& filename) const
 void U_NET::load(const str& filename)
     {
         std::ifstream f(filename, std::ios::binary);
-    if (!f){
+        if(!f.is_open())
+        {
+            std::cerr << "Failed to open: " << strerror(errno) << "\n";
+            std::exit(1);
+        }
+        if (!f){
         std::cerr << "Error opening file for loading: " << filename << "\n";
         std::exit(1);
         }

@@ -152,3 +152,187 @@ Text read_words(Text words, const int start, const int end)
     }
     return selectedWords;
 }
+
+
+/*
+#include "dataloader.h"
+
+// ---------------------------------------------------------------------------
+// FolderPaths  –  collect up to `filenums` plain-file names from `folder`
+// ---------------------------------------------------------------------------
+Text FolderPaths(const str& folder, const int filenums)
+{
+    Text files;
+ 
+    DIR* dir = opendir(folder.c_str());
+    if (!dir) {
+        std::cerr << "Cannot open directory: " << folder << "\n";
+        return files;
+    }
+ 
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        // Skip the "." and ".." pseudo-entries
+        if (entry->d_name[0] == '.') continue;
+ 
+        str fullPath = folder + "/" + entry->d_name;
+ 
+        struct stat st{};
+        if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            files.emplace_back(entry->d_name);
+        }
+    }
+    closedir(dir);
+ 
+    if (static_cast<int>(files.size()) < filenums) {
+        std::cout << "Not enough files in directory... num files: "
+                  << files.size() << "\n";
+        for (const auto& f : files) std::cout << f << "\t";
+    }
+ 
+    if (static_cast<int>(files.size()) == filenums) return files;
+ 
+    // Trim or return whatever we have
+    Text new_files;
+    for (int i = 0; i < filenums && i < static_cast<int>(files.size()); ++i)
+        new_files.push_back(files[i]);
+ 
+    return new_files;
+}
+ 
+// ---------------------------------------------------------------------------
+// TextProcessor helpers
+// ---------------------------------------------------------------------------
+str TextProcessor::toLower(const str& string)
+{
+    str result = string;
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    return result;
+}
+ 
+str TextProcessor::removePunctuation(const str& string)
+{
+    str result;
+    str punctuation = ",.\"'!@#$%^&*(){}?/;`~:<>+=-\\";
+    for (char c : string) {
+        if (punctuation.find(c) == str::npos)
+            result += c;
+    }
+    return result;
+}
+ 
+bool TextProcessor::isAlpha(const str& word)
+{
+    if (word.empty()) return false;
+    return std::all_of(word.begin(), word.end(), ::isalpha);
+}
+ 
+Text TextProcessor::tokenize(const str& line)
+{
+    Text tokens;
+    std::istringstream iss(line);
+    str word;
+    while (iss >> word) tokens.push_back(word);
+    return tokens;
+}
+ 
+// ---------------------------------------------------------------------------
+// getFilesInDirectory  –  returns full paths of regular files in folderPath
+// ---------------------------------------------------------------------------
+Text TextProcessor::getFilesInDirectory(const str& folderPath)
+{
+    Text filenames;
+ 
+    DIR* dir = opendir(folderPath.c_str());
+    if (!dir) {
+        std::cerr << "Cannot open directory: " << folderPath << "\n";
+        return filenames;
+    }
+ 
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (entry->d_name[0] == '.') continue;
+ 
+        str fullPath = folderPath + "/" + entry->d_name;
+ 
+        struct stat st{};
+        if (stat(fullPath.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            filenames.push_back(fullPath);
+    }
+    closedir(dir);
+ 
+    return filenames;
+}
+ 
+Text TextProcessor::readAllStories(const str& folderPath)
+{
+    Text allLines;
+    Text filenames = getFilesInDirectory(folderPath);
+ 
+    if (filenames.empty()) {
+        std::cerr << "No files found in directory: " << folderPath << "\n";
+        return allLines;
+    }
+ 
+    std::cout << "Found " << filenames.size() << " files in directory\n";
+ 
+    for (const str& filename : filenames) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Warning: Could not open file " << filename << "\n";
+            continue;
+        }
+ 
+        str line;
+        while (std::getline(file, line)) {
+            if (line == "----------") break;
+            if (!line.empty()) allLines.push_back(line);
+        }
+ 
+        file.close();
+    }
+ 
+    return allLines;
+}
+ 
+Text TextProcessor::cleanText(const Text& lines)
+{
+    Text cleanedWords;
+    for (const str& line : lines) {
+        str lowerLine  = toLower(line);
+        str cleanLine  = removePunctuation(lowerLine);
+        Text tokens    = tokenize(cleanLine);
+        for (const str& word : tokens) {
+            if (isAlpha(word))
+                cleanedWords.push_back(word);
+        }
+    }
+    return cleanedWords;
+}
+ 
+// ---------------------------------------------------------------------------
+// Free functions
+// ---------------------------------------------------------------------------
+Text LoadStory(const str& path)
+{
+    TextProcessor processor;
+    Text data         = processor.readAllStories(path);
+    Text cleanedWords = processor.cleanText(data);
+    return cleanedWords;
+}
+ 
+void Reading(Text words)
+{
+    for (const auto& word : words) std::cout << word << "\t";
+    std::cout << "\n_____________________ \n";
+}
+ 
+Text read_words(Text words, const int start, const int end)
+{
+    Text selectedWords;
+    for (int i = start; i < end && i < static_cast<int>(words.size()); ++i)
+        selectedWords.push_back(words[i]);
+    return selectedWords;
+}
+
+*/
