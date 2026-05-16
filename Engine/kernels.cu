@@ -1,10 +1,28 @@
-#include "includes/kernels.h"
+#include "kernels.h"
 
 __device__ __forceinline__ double warpReduceSum(double val, int offset)
 {
     for (int off = offset; off > 0; off >>= 1)
         val += __shfl_down_sync(0xffffffff, val, off);
     return val;
+}
+
+__device__ __forceinline__ double block_reduce_sum(double val, double* smem)
+{
+    const int lane   = threadIdx.x & 31;
+    const int warpId = threadIdx.x >> 5;
+    const int nWarps = (blockDim.x + 31) >> 5;
+
+    val = warpReduceSum(val, 16);      
+
+    if (lane == 0) smem[warpId] = val;
+    __syncthreads();
+
+    val = 0.0;
+    if (threadIdx.x == 0)
+        for (int w = 0; w < nWarps; ++w) val += smem[w];
+
+    return val;                           
 }
 
 __device__ double atomicAddDouble(double* __restrict__ address, double val)
@@ -41,11 +59,7 @@ __device__ inline void atomicMinFloat(float* __restrict__ addr, float value) {
     } while (assumed != old);
 }
 
-__device__ int ceil_div(const int a, const int b)
-{
-    return (a + b - 1) / b;
-
-}
+__device__ int ceil_div(const int a, const int b){return (a + b - 1) / b;}
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, const int d0, const int d1, const int d2, const int d3, const int i0, const int i1, const int i2, const int i3)
 {
@@ -856,6 +870,7 @@ __global__ void INorm(float* __restrict__ data, const float* __restrict__ mean, 
                        / sqrtf((1.0f/out_size)*std[batch_idx*channels+channel_idx] + epsilon)) + beta;
 }
 
+
 __global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict__ node, const float* __restrict__ ngrad, 
                               const float* __restrict__ ggamma, const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col)
@@ -934,7 +949,15 @@ __global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict
     igrad[global_idx] += ngrad[batch_idx] / N;
 }
 
-
+__global__ void BatchMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col)
+{
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >=batch*channels*row*col) return;
+    const int out_size = row*col;
+    const int N = batch * out_size; 
+    const int channel_idx = (global_idx / out_size) % channels;
+    igrad[global_idx] += ngrad[channel_idx] / N;
+}
 
 __global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv)
 {
@@ -1565,15 +1588,15 @@ __global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, in
     float sum = 0.0f;
     for (int i = tid; i < total_rows; i += blockDim.x){sum += X[i * columns + col];}
     sum = warpReduceSum(sum);
-    static __shared__ float shared_sums[32];
-    int lane = tid % 32;
-    int wid = tid / 32;
+    static __shared__ float shared_sums[BLOCK_SIZE];
+    int lane = tid % BLOCK_SIZE;
+    int wid = tid / BLOCK_SIZE;
 
     if (lane == 0) shared_sums[wid] = sum;
     __syncthreads();
     if (wid == 0)
     {
-        sum = (tid < (blockDim.x / 32)) ? shared_sums[lane] : 0.0f;
+        sum = (tid < (blockDim.x / BLOCK_SIZE)) ? shared_sums[lane] : 0.0f;
         sum = warpReduceSum(sum);
         if (tid == 0){atomicAdd(&Y[col], sum * scale);}
     }
@@ -1728,87 +1751,119 @@ __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int
     else{printf("COMPUTATIONAL ERROR: Input to SQRTSCALE is nan");return;}
 }
 
-__global__ void MSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const long long total) 
+
+__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const long long total) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
-    const float out = output[global_idx];
+    const float tar =   target[global_idx];
     const float x_val = X[global_idx];
-    output[global_idx] = (1.0f / (float)batch_size) * (out - x_val)*(out - x_val);
+    output[global_idx] = (tar - x_val) * (tar - x_val);
 
 }
 
-__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a ,const int b, const long long total, const bool last) 
+__global__ void ce_kernel(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const long long total) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    if(last) output[global_idx] = 2.0f * (x_val - tar) / (float)total;
-    else {output[global_idx] += (2.0f * (x_val - tar) * grad[global_idx]) / (float)total;}
+    output[global_idx] = - tar * logf(x_val + 1e-27f);
 
 }
 
-__global__ void scalarMSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const long long total_size)
-{
-    if(threadIdx.x + blockDim.x * blockIdx.x  >= total_size) return;
-    const int tpb = blockDim.x;
-    const long long block_start = (long long)blockIdx.x * tpb;
-    const long long block_end   = min(block_start + tpb, total_size);
-    double block_sum = 0.0;
-    if (threadIdx.x == 0) 
-    {
-        for (long long i = block_start; i < block_end; ++i) 
-        {
-            float diff = target[i] - X[i];
-            if (diff != diff) {printf("COMPUTATIONAL ERROR: Input to ScalarMSE is bogus at idx %lld\n", i);}
-            double dg = (double)diff;
-            block_sum += dg * dg;
-        }
-        atomicAdd(output, block_sum);
-    }
-}
-
-__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a ,const int b, const long long total, const bool last) 
+__global__ void e_kernel(const float* __restrict__ X, float* __restrict__ output, const long long total) 
 {   
-    //Cross Entropy Derivative
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >= total){return;}
+    const float x_val = X[global_idx];
+    output[global_idx] = -x_val * logf(x_val + 1e-27f);
+
+}
+
+
+__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total)
+{
+    __shared__ double smem[THREADSPERBLOCK];
+    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    double val = 0.0;
+    if (gid < total) { double d = (double)target[gid] - (double)X[gid]; val = d * d; }
+    val = block_reduce_sum(val, smem);
+    if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)total));
+}
+
+__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total)
+{
+    __shared__ double smem[THREADSPERBLOCK];
+    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    double val = 0.0;
+    if (gid < total) val = -(double)target[gid] * log((double)X[gid] + 1e-27);
+    val = block_reduce_sum(val, smem);
+    if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)total));
+}
+
+__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int batch, const long long total)
+{
+    __shared__ double smem[THREADSPERBLOCK];
+    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    double val = 0.0;
+    if (gid < total) { double x = (double)X[gid]; val = -x * log(x + 1e-27f); }
+    val = block_reduce_sum(val, smem);
+    if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)batch));
+}
+
+
+__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total,const bool last, const bool full) 
+{   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    if(last) output[global_idx] = - (tar / (x_val + 1e-8f)) / (float)batch_size;
-    else output[global_idx] -=  (tar*grad[global_idx] / (x_val + 1e-8f)) / (float)batch_size;
+    const long long idx = full ? global_idx : 0;
+    if(last) output[global_idx] += 2.0f * (x_val - tar) / (float)total;
+    else {output[global_idx] += (2.0f * (x_val - tar) * grad[idx]) / (float)total;} // Grad is a single scalar
 
 }
 
-__global__ void scalarCE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const long long total_size)
-{
-    if(threadIdx.x + blockDim.x * blockIdx.x  >= total_size) return;
-    const int tpb = blockDim.x;
-    const long long block_start = (long long)blockIdx.x * tpb;
-    const long long block_end   = min(block_start + tpb, total_size);
-    double block_sum = 0.0;
-    if (threadIdx.x == 0) 
-    {
-        for (long long i = block_start; i < block_end; ++i) 
-        {
-            double diff = -target[i] * log(X[i] + 1e-100);
-            if (diff != diff) {printf("COMPUTATIONAL ERROR: Input to ScalarCE is bogus at idx %lld\n", i);}
-            block_sum += diff;
-        }
-        atomicAdd(output, block_sum);
-    }
+__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool full) 
+{   
+    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(global_idx >= total){return;}
+    const float tar = target[global_idx];
+    const float x_val = X[global_idx];
+    const long long idx = full ? global_idx : 0;
+    if(last) output[global_idx] -=  (tar / (x_val + 1e-27f)) / (float)total;
+    else output[global_idx] -=  (tar*grad[idx] / (x_val + 1e-27f)) / (float)total;
+
 }
 
-__global__ void vectorE(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const int deriv) 
+__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int batch, const long long total, const bool last, const bool full) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total) return;
-    const float out = output[global_idx];
     const float x_val = X[global_idx];
-    if(deriv == 1) output[global_idx] -= (logf(x_val) + 1.0f) * grad[global_idx];
-    else output[global_idx] =  -x_val *logf(x_val);
+    const long long idx = full ? global_idx : 0;
+    if(last) output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f) / (float)batch;
+    else output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f)*grad[idx] / (float)batch;
 }
+
+__global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch)
+{
+    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= batch) return;
+    const float diff = X[idx * batch + (int)t_idx[idx]] - target[idx];
+    atomicAdd(&out[0], diff * diff);
+}
+
+__global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch)
+{
+    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if(idx >= batch) return;
+    const float diff = X[idx * batch + (int)t_idx[idx]] - target[idx];
+    out[idx] =  diff * diff;
+}
+
+
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict__ max, const float * __restrict__ min, const int batch, const long long total_size) 
 {
@@ -2250,6 +2305,20 @@ __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const
     X[0] = max_idx;
 }
 
+__global__ void identityKernel(float* __restrict__ input, const int batch, const int channels, const int row_col)
+{
+    const long long total = (long long)batch * channels * row_col;
+    const long long idx = threadIdx.x + blockDim.x* blockIdx.x;
+    if(idx >= total) return;
+    const int mat = row_col * row_col;
+    const int depth = channels * mat;
+    const int bc_idx = idx / row_col;
+    const int b_idx = bc_idx / channels;
+    const int c_idx = bc_idx % channels;
+    const int r_idx = idx % row_col;
+    input[b_idx * depth + c_idx * mat + r_idx * row_col + r_idx] = 1.0f;
+}
+
 __global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv)
 {
     int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
@@ -2285,7 +2354,7 @@ __global__ void maxKernel(const float* __restrict__ inp_A, const float* __restri
     const float val = (A < B) ? B : A;
     if(deriv == 1)
     {
-        const float indicator = mask[idx]; // output is a place holder for node->grad
+        const float indicator = mask[idx]; 
         if(indicator == 1.0f) grad_A[idx] += output[idx];
         if(indicator == -1.0f) grad_B[idx] += output[idx];
     }
@@ -2302,11 +2371,42 @@ __global__ void getactionKernel(const float* __restrict__ input, const float* __
     else output[idx] = input[idx * action_dim + ac_id];
 }
 
-__global__ void rl_discounted_returns(const float* __restrict__ trajectories, float* __restrict__ advantages, float* __restrict__ returns,
-                                      const float gamma, const float lambda, const int batch, const int traj_size);
-
 __global__ void static_assign_values( const float* __restrict__ traj, const float* __restrict__ advantages, const float* __restrict__ returns, 
-    const float* __restrict__ states, const int*   __restrict__ idx,  
-    float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
-    float* __restrict__ out_ret, float* __restrict__ out_states,
-    const int batch, const int traj_size, const int state_dim, const int mini_batch_offset);
+    const float* __restrict__ states, const int*   __restrict__ idx,   float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
+    float* __restrict__ out_ret, float* __restrict__ out_states, const int total, const int state_dim, const int mini_batch_offset)         
+{
+    const int global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total * state_dim) return;
+
+    const int d = global_idx % state_dim;
+    const int i = global_idx / state_dim;
+    const int t = idx[mini_batch_offset + i];
+
+    if (d == 0)
+    {
+        out_actions[i] = traj[t * 5 + 0];
+        out_logp[i]    = traj[t * 5 + 2];
+        out_adv[i]     = advantages[t];
+        out_ret[i]     = returns[t];
+    }
+
+    out_states[i * state_dim + d] = states[t * state_dim + d];
+}
+
+__global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, float* __restrict__ state, 
+    float* __restrict__ target, float* __restrict__ target_indices, const int* __restrict__ d_idx, const int state_total, const int batch, const int start)
+    {
+        const int global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+        if (global_idx >= batch * state_total) return;
+        const int d = global_idx % state_total;
+        const int i = global_idx / state_total;
+        const int t = d_idx[start + i];
+
+        if (d == 0)
+        {
+            target_indices[i] = replay_traj[t * 5 + 0];
+            target[i]         = replay_traj[t * 5 + 3];
+        }
+        
+        state[i * state_total + d] = state_replay[t * state_total + d];
+    };

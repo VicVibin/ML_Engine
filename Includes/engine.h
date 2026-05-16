@@ -1,26 +1,27 @@
 #pragma once
-#include "dataloader.h"
 #include "debugging_utils.h"
 #include "kernels.h"
+#include <vector>
+#include <functional>
+#include <memory>
+#include <iostream>
+#include <map>
+#include <utility>
+#include <random>
+#include <unordered_set>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
 
 struct NodeBackProp;
 using graph = std::shared_ptr<NodeBackProp>;
 using graph_tree = std::vector<graph>;
-using BatchText = std::vector<Text>;
 using graphFn = std::function<graph(graph)>;
 
 void isNan(const str name, const float* X, const long long total);
 
 void diffuse(float* input, float* model, float* theta, const long long total, const int t, const int T, const double s, const uint64_t seed);
-
-struct BatchTexts
-{
-    BatchText encoder;
-    BatchText decoder;
-    BatchText target;
-
-    BatchTexts(int batch_size,int clen):encoder(batch_size,Text(clen+1)),decoder(batch_size,Text(clen+1)),target(batch_size,Text(clen+1)){}
-};
 
 struct NodeBackProp 
 {
@@ -39,7 +40,7 @@ struct NodeBackProp
     std::function<void()> updateParams;
     std::function<void(const double*)> clipnorm;
     std::function<void(double*)> accumulate;
-    std::function<void()> printparams;
+    std::function<void(const bool full)> printparams;
     virtual void update(const bool W=ADAMW){};
     
     NodeBackProp(str name, int batch, int d1, int d2, int d3, int allocation);
@@ -73,6 +74,8 @@ struct AdamParameter : public NodeBackProp {
 
     void gradnorm(const double* global_scale);
 
+    void operator =(const AdamParameter& other);
+
 };
 
 void Dimension(graph X);
@@ -100,6 +103,9 @@ public:
     double GB = 0;
     bool calculate_loss = false;
     float loss;
+    graph identity_like(const graph& X);
+    graph track(const graph_tree& X);
+    graph identity(const graph& X);
     graph like(const graph& X, const str name = "");
     graph Last(const graph& X);
     graph Clamp(const graph& X, const float min, const float max);
@@ -116,16 +122,18 @@ public:
 
     graph Scale(const graph& input, const float scale);
     graph Add(const graph& A, const graph& B, const bool last = false);
-    graph Multiply(const graph& A, const graph& B, const bool last = false);
+    graph Multiply(const graph& A, const graph& B);
     graph Exp(const graph& X);
     graph Log(const graph& X);
     graph Min(const graph& A, const graph& B);
     graph Max(const graph& A, const graph& B);
 
     graph MeanSquaredError(const graph& prediction, const graph& target, const bool last);
-    graph MeanSquaredError(const graph& prediction, const float& target, const int& target_idx, const bool last);
+    graph MeanSquaredError(const graph& prediction, const float* target, const float* target_idx, const bool last);
     graph CrossEntropy(const graph& prediction, const graph& target, const bool last);
-    graph Entropy(const graph& X);
+    
+
+    graph Entropy(const graph& X, const bool last = false);
     graph SoftMaxCrossEntropy(const graph& prediction, const graph& target, const bool last);
 
     graph BMM(const graph& A, const graph& B); // m x n, n x p = m x p
@@ -149,6 +157,7 @@ public:
     graph VecConcat(const graph_tree& inputs);
 
     graph LAYERMEAN(const graph& X);
+    graph BATCHMEAN(const graph& X);
 
     graph LayerNorm(const graph& X);
     graph BatchNorm(const graph& X);
@@ -157,22 +166,14 @@ public:
 
     void clipNorm(double* global_scale);
     void accumulate(double* global_scale); 
-    void ParameterUpdate();
-    void forward();
-    void backward();
-    void zero_grad();
-    void printNodes(const bool display_grad=false);
-    void clear_graph();
-    void clean_clear_graph();
-};
-
-class Identity{   
-private:
-    GraphOperations &go;
-    str name;
-public: 
-    Identity(GraphOperations& go_ref, const str name = "");
-    graph forward(const graph& X);
+    void ParameterUpdate(const graph&X = nullptr, const bool show = false);
+    void forward(const graph& X = nullptr, const bool show = false);
+    void backward(const graph&X = nullptr, const bool show = false);
+    void zero_grad(const graph&X = nullptr, const bool show = false);
+    void printParams(const graph&X = nullptr, const bool show = false);
+    void printNodes(const graph&X = nullptr, const int show = 0);
+    void clear_graph(const graph&X = nullptr);
+    void clean_clear_graph(const graph&X = nullptr);
 };
 
 class Linear
@@ -188,14 +189,16 @@ public:
     graph forward(const graph & X);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
+    void operator =(const Linear& other);
 };
 
 class Convolute2D {
 private:
     GraphOperations go;
     graph T_node;
-    int inp, out, c, d, pad, stride;
+    
 public:
+    int inp, out, c, d, pad, stride;
     AdamParameter *weights, *bias;
     str name;
     /**
@@ -212,6 +215,7 @@ public:
     Convolute2D(GraphOperations&go_ref, int Input, int Output, int C=3, int D=3, int stride = 1, int padding = 1, str param = "");
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
+    void operator=(const Convolute2D& other);
     graph forward(const graph& X);
 };
 
@@ -240,6 +244,59 @@ public:
     graph forward(const graph& X);
 };
 
+
+class Conv2D {
+private:
+    GraphOperations go;
+    graph T_node;
+    
+public:
+    int inp, out, c, d, pad, stride;
+    AdamParameter *weights, *bias;
+    str name;
+    /**
+     * @brief For standard convolution call C2D (go, inp, out);
+     * @param name go: GraphOperations reference
+     * @param Input: number of input channels
+     * @param Output: number of output channels
+     * @param C: kernel size row: (default 3)
+     * @param D: kernel size col: (default 3)
+     * @param stride: stride size (default 1)
+     * @param padding: padding size (default 1)
+     * @param param: Name of the operation (default "" )
+     */
+    Conv2D(GraphOperations&go_ref, int Input, int Output, int C=3, int D=3, int stride = 1, int padding = 1, str param = "");
+    void save(std::ofstream& f) const;
+    void load(std::ifstream& f);
+    graph forward(const graph& X);
+};
+
+class Conv2DT {
+private:
+    GraphOperations go;
+    graph T_node;
+    int inp, out, c, d, pad, stride;
+public:
+    AdamParameter *weights, *bias;
+    str name;
+    /**
+     * @brief For transposed convolution call C2DT (go, inp, out);
+     * @param name go: GraphOperations reference
+     * @param Input: number of input channels
+     * @param Output: number of output channels
+     * @param C: kernel size row: (default 3)
+     * @param D: kernel size col: (default 3)
+     * @param stride: stride size (default 1)
+     * @param padding: padding size (default 1)
+     * @param param: Name of the operation (default "" )
+     */
+    Conv2DT(GraphOperations&go_ref, int Input, int Output, int C=2, int D=2, int stride=2, int padding=0, str param="");
+    void save(std::ofstream& f) const;
+    void load(std::ifstream& f);
+    graph forward(const graph& X);
+};
+
+
 class TimeMLPBlock
 {
 
@@ -248,6 +305,34 @@ public:
     Linear *L0, *L1;
     TimeMLPBlock(GraphOperations &go_ref, const int t_embed_dim, const int t_hidden);
     graph forward(const graph & X);
+    void save(std::ofstream& f) const;
+    void load(std::ifstream& f);
+};
+
+class Multi_Linear_Residual_Block
+{
+    /*
+    @brief: Required Activation and Normalization layer lambdas with reference capture for activation and normalization.. 
+    */
+private:
+    GraphOperations& go;
+public:
+    const int input_dim, output_dim, residuals, hidden_dim, layers;
+    std::vector<Linear*> sequence;
+    Multi_Linear_Residual_Block(GraphOperations& go, const int input, const int output, const int num_residuals, const int layers, const int hidden_size);
+    template<typename ActFn, typename NormFn>
+    graph forward(const graph& X, ActFn activation, NormFn norm)
+    {
+        auto H = sequence[0]->forward(X);
+        for (int r = 0; r < residuals; ++r){
+        auto A = H; 
+        for (int j = 0; j < layers; ++j){
+            int idx = r * layers + j + 1; 
+            if(idx < residuals * layers) A = std::invoke(activation, go, sequence[idx]->forward(A));
+        } H = std::invoke(norm, go, go.Add(H,A));}
+        return sequence[residuals * layers]->forward(H);
+    }
+
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
 };

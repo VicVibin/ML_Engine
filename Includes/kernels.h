@@ -1,11 +1,13 @@
 #pragma once
 #include <curand_kernel.h>
 #include <string>
+#include <cstdint>
+#include <cfloat>
 
-#define BLOCK_SIZE 32
-#define THREADSPERBLOCK 1024
-#define PIBY2 1.57079632679
-#define PI 3.14159265359
+static constexpr int BLOCK_SIZE = 32;
+static constexpr int THREADSPERBLOCK = 256;
+static constexpr float PIBY2  = 1.57079632679;
+static constexpr float PI  = 3.14159265359;
 using str = std::string;
 
 template <typename T>
@@ -55,6 +57,7 @@ __global__ void bmmABT(const float* __restrict__ a, const float* __restrict__ b,
 __global__ void bmmATB(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, int batch_size, int m, int n, int p, int backward = 0,int A=1, int B=1, int C=1, float scale = 1);
 
 __global__ void bmmATBT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, int batch_size, int m, int n, int p,int backward = 0,int A=1,int B=1, int C=1, float scale = 1);
+
 
 __global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, 
                     const int p, const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
@@ -118,6 +121,8 @@ __global__ void InstanceBackward(float* __restrict__ igrad, const float* __restr
                               const int channels, const int row, const int col);
 
 __global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col);
+
+__global__ void BatchMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col);
 
 __global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv =0);
 
@@ -189,7 +194,6 @@ __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, co
 
 __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, const int batch_size,const int depth,const int a, const int b, const int c, const int d);
 
-
 __global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const long long total_size);
 
 template <typename T>
@@ -201,8 +205,8 @@ __global__ void Compare(const T* __restrict__ scale, const T* __restrict__ scale
     const T b = scale_test[idx];
     if(a != b) 
     {
-        printf("Output is not the same at idx: %i, values are scale[idx] : %f and scale_test[idx]: %f", idx, a, b);
-        *((int*)0) = 0;
+        //printf("Output is not the same at idx: %i, values are scale[idx] : %f and scale_test[idx]: %f", idx, a, b);
+        __trap();
         return;
     }
 }
@@ -237,6 +241,7 @@ __global__ void Update(float* __restrict__ output, const float*  __restrict__ gr
 
 __global__ void Channel_Squeeze1D(const float* __restrict__ X, float*  __restrict__ average, const int batch, const int depth, const int a, const int b);
 
+
 template <typename T1, typename T2>
 __global__ void SV(T1* __restrict__ X, const T2 scale, const long long total, const int type)
 {
@@ -268,19 +273,33 @@ __global__ void SP(T1* __restrict__ X, const T2 *scale, const long long total, c
     else X[global_idx] /= factor;
 }
 
+
 __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int type = 0);
 
-__global__ void MSE(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const int batch_size, const long long total);
 
-__global__ void deriv_MSE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total, const bool last = true);
+__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
 
-__global__ void scalarMSE(const float* __restrict__ X, const float*  __restrict__ target, float*  __restrict__ output, const int batch_size, const long long total_size);
+__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
 
-__global__ void deriv_CE(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const int batch_size, const int a , const int b, const long long total, const bool last = true);
+__global__ void   e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
 
-__global__ void scalarCE(const float* __restrict__ X, const float*  __restrict__ target, float*  __restrict__ output, const int batch_size, const long long total_size);
 
-__global__ void vectorE(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const int deriv = 0);
+__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total);
+
+__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total);
+
+__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int batch, const long long total);
+
+
+__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total,const bool last, const bool full);
+
+__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool full);
+
+__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int batch, const long long total, const bool last, const bool full);
+
+__global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch, const int col);
+
+__global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch, const int col, const bool last, const bool full);
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float* __restrict__ max, const float *__restrict__ min, const int batch, const long long total_size);
 
@@ -359,6 +378,8 @@ __global__ void TopKSampleKernel(const float* __restrict__ arr, int* __restrict_
 
 __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const int size);
 
+__global__ void identityKernel(float* __restrict__ input, const int batch, const int channels, const int row_col);
+
 __global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv = 0);
 
 __global__ void minKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
@@ -367,58 +388,15 @@ __global__ void minKernel(const float* __restrict__ inp_A, const float* __restri
 __global__ void maxKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
                           float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv=0);
 
-__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv = false)
-{
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if(idx >= total) return;
-    const int ac_id = actions[idx];
-    if(deriv) output[idx * action_dim + ac_id] += input[idx];
-    else output[idx] = input[idx * action_dim + ac_id];
-}
-
-__global__ void rl_discounted_returns(const float* __restrict__ trajectories, float* __restrict__ advantages, float* __restrict__ returns,
-                                      const float gamma, const float lambda, const int batch, const int traj_size){
-    const long long idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(idx >= batch) return;
-    float gae = 0.0f;
-    float next_val = 0.0f;
-    for (int t = traj_size-1; t >= 0; t--) 
-    {         
-        const int a_off = idx * traj_size * 5 + 5 * t; 
-        float delta = trajectories[a_off + 1] + gamma * next_val * (1.f - trajectories[a_off + 4]) - trajectories[a_off + 3];
-        gae = delta + gamma * lambda * (1.0f - trajectories[a_off + 4]) * gae;
-        advantages[idx * traj_size + t] = gae;
-        next_val = trajectories[a_off + 3];
-    }
-         
-    for (int t = 0; t < traj_size; t++)
-    {
-        returns[idx * traj_size + t] = advantages[idx * traj_size + t] + trajectories[idx * traj_size * 5 + 5 * t + 3]; // returns = adv + baseline
-    } 
-}
+__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv = false);
 
 __global__ void static_assign_values( const float* __restrict__ traj, const float* __restrict__ advantages, const float* __restrict__ returns, 
     const float* __restrict__ states, const int*   __restrict__ idx,  
     float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
     float* __restrict__ out_ret, float* __restrict__ out_states,
-    const int batch, const int traj_size, const int state_dim, const int mini_batch_offset)         
-{
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(global_idx  >= batch * state_dim) return;
-    const int d = global_idx % state_dim;
-    const int i  = global_idx / state_dim;
-    if (i >= batch || d >= state_dim) return;
-    const int t        = idx[mini_batch_offset + i]; 
-    const int batch_idx = t / traj_size;
-    const int step_idx  = t % traj_size;
-    const int traj_off  = (batch_idx * traj_size + step_idx) * 5;
-    if (d == 0)
-    {
-        out_actions[i] = traj[traj_off + 0];
-        out_logp[i]    = traj[traj_off + 2];
-        out_adv[i]     = advantages[t];
-        out_ret[i]     = returns[t];
-    }
+    const int total, const int state_dim, const int mini_batch_offset);
 
-    if (d < state_dim) out_states[i * state_dim + d] = states[t * state_dim + d];
-}
+
+__global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, 
+    float* __restrict__ state, float* __restrict__ target, float* __restrict__ target_indices,
+    const int* __restrict__ d_idx, const int state_total, const int batch, const int start);
