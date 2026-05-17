@@ -1295,11 +1295,7 @@ __global__ void TaNH(const float* __restrict__ input, float* __restrict__ output
 {
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
-    const float val = input[global_idx];
-    const float exp = expf(val);
-    const float negexp = 1.0f / exp;
-    output[global_idx] = (exp - negexp) / (exp + negexp);
-
+    output[global_idx] = tanhf(input[global_idx]);
 }
 
 __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
@@ -1311,6 +1307,29 @@ __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restr
     const float deriv = 4.0 / (exp2 + negexp2 + 2.0); 
     grad_out[global_idx] += grad_in[global_idx] * deriv;
 
+}
+
+__global__ void GeLU(const float* __restrict__ input, float* __restrict__ output, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float x = input[global_idx];
+    const float val = sqrtf(2.0 / PI) * (x + 0.044715 * x * x * x);
+    const float tanh_val = tanhf(val);
+    output[global_idx] = 0.5f * x * (1.0 + tanh_val);
+
+}
+
+__global__ void deriv_GeLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
+{
+    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (global_idx >= total_size) return;
+    const float x = input[global_idx];
+    const float root = sqrtf(2.0f / PI);
+    const float u = root * (x + 0.044715f * x * x * x);
+    const float dU_dx = root * (1.0f + 0.134145f * x * x);
+    const float tanh_u = tanhf(u);
+    grad_out[global_idx] += (0.5f + 0.5f * tanh_u + 0.5f*x*(1.0f - tanh_u * tanh_u)*dU_dx)*grad_in[global_idx];
 }
 
 __global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ output, const int total_size)
@@ -1752,33 +1771,37 @@ __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int
 }
 
 
-__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const long long total) 
+__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar =   target[global_idx];
     const float x_val = X[global_idx];
-    output[global_idx] = (tar - x_val) * (tar - x_val);
+    if(!deriv) output[global_idx] = (tar - x_val) * (tar - x_val);
+    if(deriv && !last) output[global_idx] -= 2.0f * (tar - x_val);
+    if(deriv && last)  output[global_idx] -= 2.0f * (tar - x_val) * grad[global_idx];
 
 }
 
-__global__ void ce_kernel(const float* __restrict__ X, const float* __restrict__ target, float* __restrict__ output, const long long total) 
+__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    output[global_idx] = - tar * logf(x_val + 1e-27f);
-
+    if(!deriv) output[global_idx] = output[global_idx] = - tar * logf(x_val + 1e-27f);
+    if(deriv && !last) output[global_idx] -= tar / (x_val + 1e-27f);
+    if(deriv && last)  output[global_idx] -= tar * grad[global_idx] / (x_val + 1e-27f);
 }
 
-__global__ void e_kernel(const float* __restrict__ X, float* __restrict__ output, const long long total) 
+__global__ void e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
 {   
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float x_val = X[global_idx];
-    output[global_idx] = -x_val * logf(x_val + 1e-27f);
-
+    if(!deriv) output[global_idx] = -x_val * logf(x_val + 1e-27f);
+    if(deriv && !last) output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f);
+    if(deriv &&  last) output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f) * grad[global_idx];
 }
 
 
@@ -1847,22 +1870,26 @@ __global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restr
     else output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f)*grad[idx] / (float)batch;
 }
 
-__global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch)
+
+
+__global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch, const int col)
+{
+    __shared__ double smem[THREADSPERBLOCK];
+    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    double val = 0.0;
+    if (gid < batch) { double d = (double)target[gid] - (double)X[gid * col + (int)t_idx[gid]]; val = d * d; }
+    val = block_reduce_sum(val, smem);
+    if (threadIdx.x == 0) atomicAdd(out, (float)(val / (double)batch));
+}
+
+__global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch, const int col, const bool last, const bool full)
 {
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= batch) return;
-    const float diff = X[idx * batch + (int)t_idx[idx]] - target[idx];
-    atomicAdd(&out[0], diff * diff);
+    const float factor =  2 * (target[idx] - X[idx * col + (int)t_idx[idx]]);
+    if(last) out[idx] += factor / (float)batch;
+    else     out[idx] += factor*grad[0] / (float)batch;
 }
-
-__global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch)
-{
-    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if(idx >= batch) return;
-    const float diff = X[idx * batch + (int)t_idx[idx]] - target[idx];
-    out[idx] =  diff * diff;
-}
-
 
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict__ max, const float * __restrict__ min, const int batch, const long long total_size) 
@@ -2394,8 +2421,8 @@ __global__ void static_assign_values( const float* __restrict__ traj, const floa
 }
 
 __global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, float* __restrict__ state, 
-    float* __restrict__ target, float* __restrict__ target_indices, const int* __restrict__ d_idx, const int state_total, const int batch, const int start)
-    {
+float* __restrict__ target, float* __restrict__ target_indices, const int* __restrict__ d_idx, const int state_total, const int batch, const int start)
+{
         const int global_idx = threadIdx.x + blockIdx.x * blockDim.x;
         if (global_idx >= batch * state_total) return;
         const int d = global_idx % state_total;
@@ -2409,4 +2436,4 @@ __global__ void dqn_assign_values(const float* __restrict__ state_replay, const 
         }
         
         state[i * state_total + d] = state_replay[t * state_total + d];
-    };
+};

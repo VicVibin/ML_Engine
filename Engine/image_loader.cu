@@ -1,6 +1,6 @@
-#include "includes/image_loader.h"
+#include "image_loader.h"
 
-void BPrintImage(const graph &X, const int row_size, const int col_size)
+void BPrintImage(const graph &X,const int delay_s, const int row_size, const int col_size)
 {
     auto X_in = std::make_shared<NodeBackProp>(X->op_name, X->dim[0],X->dim[1],X->dim[2],X->dim[3],1);
     cudaMemcpy(X_in->output, X->output, X->total*sizeof(float), cudaMemcpyDeviceToDevice);
@@ -12,10 +12,10 @@ void BPrintImage(const graph &X, const int row_size, const int col_size)
     if(row_size > 0 && col_size > 0) cv::resize(image, image, cv::Size(row_size*X->dim[0], col_size), 0, 0, cv::INTER_AREA);
     
     cv::imshow(X_in->op_name, image);
-    cv::waitKey(0);
+    cv::waitKey(delay_s * 1e3);
     X_in->clear();
-
 }
+
 
 Ipointer i2p(const std::string& filepath, int row_size, int col_size) 
 {

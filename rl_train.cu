@@ -634,12 +634,19 @@ bool runWatchAgent_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
         {
             tLastStep = now;
             go.forward();
+            const float up = ReadValueAt(A_prob_state,0);
+            const float right = ReadValueAt(A_prob_state,1);
+            const float down = ReadValueAt(A_prob_state,2);
+            const float left = ReadValueAt(A_prob_state,3);
+            printf("Policy(a|s) == Up: %f | Right: %f | Down: %f | Left %f \n", up,right,down,left);
+
             auto res = env.Obstep(static_cast<Action>(ArgMaxToCPU(A_prob_state, argmaxindex)));
             obs = res.obs;
             ++totalSteps; ++frmCnt;
 
             if (res.done)
             {
+                std::cout << "DIED \n";
                 scoreHist.push_back((float)res.score);
                 if ((int)scoreHist.size() > MAX_SCORE_HIST) scoreHist.pop_front();
                 ++ep;
@@ -988,6 +995,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
     env.reset();
     auto obs = env.getObs();
     auto STATE = std::make_shared<NodeBackProp>("STATE",1,1,1,obs.total,1);
+    STATE->forward = [=](){}; 
     GraphOperations go;
 
     RL_Replay      replay(ROLLOUT, obs.total);
@@ -1026,8 +1034,9 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
             }
         }
         if (quit||toMenu) break;
-        go.zero_grad();
+
         go.forward();
+        CheckError("Forward");
 
         seq.action   = TopKSampleToCPU(A_prob_state, argmaxindex, ACT_DIM);
         auto res      = env.Obstep(static_cast<Action>((int)seq.action));
@@ -1041,7 +1050,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
 
         obs = res.obs;
         cudaMemcpy(STATE->output, obs.grid.data(), obs.total*sizeof(float), cudaMemcpyHostToDevice);
-        ++totalSteps; ++bufSteps; ++frmCnt;
+         ++frmCnt;
 
         if (res.done)
         {
@@ -1053,7 +1062,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
             cudaMemcpy(STATE->output, obs.grid.data(), obs.total*sizeof(float), cudaMemcpyHostToDevice);
         }
 
-        if (bufSteps >= ROLLOUT)
+        if (++bufSteps == ROLLOUT)
         {
             isNan(V_state);
             agent.save("../snake_ppo.bin");
@@ -1072,6 +1081,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
             go.nodes = topological_sort(go.track({A_prob_state, V_state}));
         }
 
+        ++totalSteps;
         if (frmCnt % RENDER_EVERY == 0) {
             auto now = std::chrono::steady_clock::now();
             double el = std::chrono::duration<double>(now-tFPS).count();
@@ -1101,7 +1111,7 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
     auto STATE = std::make_shared<NodeBackProp>("State", 1, 1, 1, obs.total, 1);
     RL_Replay       replay(ROLLOUT, obs.total);
     Actor_Critic    agent(go, STATE, ACT_DIM, HIDDEN_DIM);
-    agent.load("../snake_ppo.bin");
+    //agent.load("../snake_ppo.bin");
     PPOTrainer<Actor_Critic> PPO(go, agent, replay, PPO_EPOCHS, MINI_BATCH);
     Transition seq;
 
@@ -1211,7 +1221,6 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
         cudaMemcpy(replay.traj  + bufSteps * 5, &seq, sizeof(Transition), cudaMemcpyHostToDevice);
 
         obs = res.obs;
-        ++totalSteps; ++bufSteps;
 
         if (res.done) 
         {
@@ -1221,23 +1230,25 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
             env.reset();
             obs = env.getObs();
         }
+        
         cudaMemcpy(STATE->output, obs.grid.data(), obs.total*sizeof(float), cudaMemcpyHostToDevice);
 
-        if (bufSteps >= ROLLOUT)
+        if (++bufSteps == ROLLOUT)
         {
             isNan(V_state);
             agent.save("../snake_ppo.bin");
+
             float bootstrap_value = 0.f;
             cudaMemcpy(&bootstrap_value, V_state->output, sizeof(float), cudaMemcpyDeviceToHost);
             bootstrap_value *= (1 - res.done);
             go.clear_graph();
-            PPO.update(train_state, 0.99f, 0.95f, bootstrap_value);
+            PPO.update(train_state, bootstrap_value, 0.99f, 0.95f);
             bufSteps = 0;
 
             piLoss   = agent.pi_loss;
             vLoss    = agent.v_loss;
             entropy  = agent.entropy;
-
+            std::cout << "Rebuilding \n";
             std::tie(A_prob_state, V_state)  = agent.build_train(STATE);
             go.nodes = topological_sort(go.track({A_prob_state, V_state}));
 
@@ -1254,7 +1265,7 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
                 tPrint = now;
             }
         }
-
+        ++totalSteps; 
         auto now = std::chrono::steady_clock::now();
         int ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - tRender).count();
         if (ms >= RENDER_MS) { renderStatus(); tRender = now; }

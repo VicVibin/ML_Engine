@@ -169,6 +169,10 @@ __global__ void TaNH(const float* __restrict__ input, float* __restrict__ output
 
 __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
 
+__global__ void GeLU(const float* __restrict__ input, float* __restrict__ output, const int total_size);
+
+__global__ void deriv_GeLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
+
 __global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ output, const int total_size);
 
 __global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size);
@@ -297,9 +301,11 @@ __global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __rest
 
 __global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int batch, const long long total, const bool last, const bool full);
 
+
 __global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch, const int col);
 
 __global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch, const int col, const bool last, const bool full);
+
 
 __global__ void BatchMinMaxNorm(float* __restrict__ X, const float* __restrict__ max, const float *__restrict__ min, const int batch, const long long total_size);
 

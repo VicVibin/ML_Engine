@@ -113,7 +113,6 @@ ResidualBlock::ResidualBlock(GraphOperations &go_ref, const int in_channels, con
         conv2 = new Convolute2D(go, out_channels, out_channels,3,3,1,1, "ResBlock Conv2");
         time_mlp = new Linear(go, t_hidden, out_channels, "ResBlock Time MLP");
         skipconv = new Convolute2D(go,in_channels, out_channels,1,1,stride,0, "ResBlock SkipConv");
-        skip = new Identity(go, "Resblock Identity SkipConv");
         
     }
 void ResidualBlock::save(std::ofstream& f) const{
@@ -133,7 +132,7 @@ graph ResidualBlock::forward(const graph& x, const graph & t_emb)
         auto time = time_mlp->forward(t_emb);
         h = go.Broadcast_Channel(h, time);
         h = go.GroupNorm(conv2->forward(h));
-        auto skipnet = (in != out || stride != 1) ? skipconv->forward(x) : skip->forward(x);
+        auto skipnet = (in != out || stride != 1) ? skipconv->forward(x) : x;
         return go.SILU(go.Add(h, skipnet));
     }
 
@@ -144,7 +143,6 @@ LinearBlock::LinearBlock(GraphOperations &go_ref, const int in_features, const i
         conv2 = new Linear(go, out, out, "Linear 1");
         time_mlp = new Linear(go, t_hidden, out, "ResBlock Time MLP");
         skipconv = new Linear(go, in, out, "ResBlock SkipConv");
-        skip = new Identity(go, "Resblock Identity SkipConv");
         
     }
 void LinearBlock::save(std::ofstream& f) const{
@@ -164,7 +162,7 @@ graph LinearBlock::forward(const graph& x, const graph & t_emb)
         auto time = time_mlp->forward(t_emb);
         h = go.Bias_Add(h, time);
         h = go.LayerNorm(conv2->forward(h));
-        auto skipnet = (in != out || stride != 1) ? skipconv->forward(x) : skip->forward(x);
+        auto skipnet = (in != out || stride != 1) ? skipconv->forward(x) : x;
         return go.SILU(go.Add(h, skipnet));
     }
 
@@ -593,29 +591,5 @@ int main()
     sampler.loop(T-1, 0);
     sampler.display(512,512);
     return 0;
-}
-
-
-
-
-int main(){
-    const int MAX_VOCAB_SIZE = 25000;
-    const int MAX_BATCH_SIZE = 64;
-    const int MAX_CONTEXT_LEN = 256;
-    const int EMBED_DIM = 256;
-    const int context_len = 32;
-    const int HIDDEN_DIM = 256;
-
-    GraphOperations go;
-    TextualEmbedding embedder(EMBED_DIM,MAX_BATCH_SIZE, MAX_CONTEXT_LEN, MAX_VOCAB_SIZE, true);
-    Text Db = LoadStory("C:/Users/victo/Documents/Coding_Projects/DeepSeek/sherlock");
-    Text Database = read_words(Db, 0, Db.size());
-    embedder.updateVocabulary(Database);
-    printf("Total Vocabulary Size: %i | Total Word Count: %i \n", embedder.Vocabulary.size(), Database.size());
-    LLM model(go, embedder, Database, MAX_BATCH_SIZE, context_len, HIDDEN_DIM);
-    model.train(2000, 100);
-    model.generate({"so","sherlock", "holmes", "said"}, 128);
-
- 
 }
 */

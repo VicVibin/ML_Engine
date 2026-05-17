@@ -50,13 +50,11 @@ struct RL_Replay{
  *   Monte-Carlo discounted returns.
  */
     int total, state_total;
-    float* state, *traj, *advantages, *returns;
-    
+    float *state, *next_state, *traj, *advantages, *returns;
     RL_Replay(const int total, const int state_total);
+    RL_Replay(const int total, const int total_state, const bool isDQN);
     ~RL_Replay();
 };
-
-
 
 template<class AC>
 struct PPOTrainer 
@@ -121,7 +119,7 @@ struct PPOTrainer
         cudaFree(d_idx);
     };
 
-    void update(const graph&states_g, const float gamma = 0.99f, const float lam =0.95f, const float next_val = 0.0f)
+    void update(const graph&states_g, const float next_val = 0.0f, const float gamma = 0.99f, const float lam =0.95f)
     {
         /*
             @brief:
@@ -130,6 +128,7 @@ struct PPOTrainer
         */
 
         returns(gamma, lam, next_val);
+
         auto actions_g       = std::make_shared<NodeBackProp>("Actions", batch, 1, 1, 1, 1); // Argmax of (Model.Q)
         auto log_probs_old_g = go.like(actions_g, "π_old(a|s)");
         auto advantages_g    = go.like(actions_g, "A_t");
@@ -151,6 +150,7 @@ struct PPOTrainer
     void returns(const float gamma, const float lam, const float next_val = 0.0f) 
     {
         int N = rep.total;
+        printf("Value of rep.total: %i  == 2048",N);
         std::vector<float> traj(N * 5);
         cudaMemcpy(traj.data(), rep.traj, N * 5 * sizeof(float), cudaMemcpyDeviceToHost);
         std::vector<float> advantages(N), returns(N);
@@ -195,11 +195,9 @@ struct DQNTrainer
     RL_Replay &rep;
     GraphOperations &go;
     std::mt19937 rng{std::random_device{}()};
-    float gamma;
     int batch, epochs;
-    DQNTrainer(GraphOperations& go, DQN& Q_on, DQN&Q_max, RL_Replay& replay, const float gam,
-        const int b, const int e): go(go), Q(Q_on), Qx(Q_max), rep(replay), gamma(gam),
-        batch(b), epochs(e) {}
+    DQNTrainer(GraphOperations& go, DQN& Q_on, DQN&Q_max, RL_Replay& replay, const int b, const int e): go(go), Q(Q_on), Qx(Q_max), rep(replay),
+    batch(b), epochs(e) {}
     
     void update(const graph& state, float* target, float* target_indices)
     {
@@ -228,7 +226,7 @@ struct DQNTrainer
             if ((total - start) < batch) continue;  
             const int bpg = (rep.state_total * batch + tpb - 1) / tpb;
             dqn_assign_values<<<bpg,tpb>>>(rep.state, rep.traj, state->output,
-                target, target_indices,d_idx,rep.state_total,batch,start,gamma);
+                target, target_indices,d_idx,rep.state_total,batch,start);
             CheckError("dqn_assign_values");
             go.zero_grad(loss);
             go.forward();

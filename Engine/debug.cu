@@ -1,4 +1,4 @@
-#include "includes/debugging_utils.h"
+#include "debugging_utils.h"
 
 Timing::Timing(const str reason): function(reason){};
 
@@ -24,5 +24,3 @@ void CheckError(const str& reason)
     std::cerr << "Runtime error in " << reason << ": " << cudaGetErrorString(syncErr) << std::endl; std::exit(1);
     }
 }
-
-

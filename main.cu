@@ -14,7 +14,7 @@ int main(){
 
     GraphOperations go;
     TextualEmbedding embedder(EMBED_DIM,MAX_BATCH_SIZE, MAX_CONTEXT_LEN, MAX_VOCAB_SIZE);
-    Text Db = LoadStory("C:/Users/victo/Documents/Coding_Projects/text");
+    Text Db = LoadStory("text_training_data");
     Text Database = read_words(Db, 0, Db.size());
     embedder.updateVocabulary(Database);
     printf("Total Vocabulary Size: %i | Total Word Count: %i \n", embedder.Vocabulary.size(), Database.size());
@@ -33,7 +33,7 @@ int main()
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int> dist(0, T-1);
 
-    auto base = Bi2n("KPOP", 1, img_size, img_size);
+    auto base = Bi2n("image_training_data", 1, img_size, img_size);
     StandardNorm(base);
     auto input  = go.like(base, "Input Image"), target = go.like(base, "Target Image");
 
@@ -72,3 +72,6 @@ int main()
     return 0;
 
 }
+
+
+*/

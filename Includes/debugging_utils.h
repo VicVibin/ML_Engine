@@ -7,11 +7,11 @@
 
 using str = std::string;
 
-#define XAVIER 6.0f
-#define ADAMW true
-#define NORM 1.0f
-#define LEARNING_RATE 1e-3f
-#define SHOULDNORM false
+static constexpr float XAVIER  = 6.0f;
+static constexpr bool ADAMW = true;
+static constexpr float NORM = 1.0f;
+static constexpr float LEARNING_RATE = 1e-3f;
+static constexpr bool SHOULDNORM = false;
 
 template <typename T>
 void printHeadGPU(const str name, T* d_ptr, int start, int elems, int total)
@@ -28,7 +28,7 @@ template <typename T>
 void printHeadGPU(const str name, const T* X, const int ch, const int rows, const int cols, const int total)
 {
     std::vector<T> CPU(total);
-    cudaMemcpy(CPU.data(), d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
+    cudaMemcpy(CPU.data(), X, sizeof(T)*total, cudaMemcpyDeviceToHost);
 
     std::cout << "Printing dimensions for node " << name << "->output \n";
     for (int c = 0; c < min(3,ch); ++c)
@@ -51,7 +51,7 @@ template <typename T>
 void printHeadGrad(const str name, const T* X, const int ch, const int rows, const int cols, const int total)
 {
     std::vector<T> CPU(total);
-    cudaMemcpy(CPU.data(), d_ptr, sizeof(T)*total, cudaMemcpyDeviceToHost);
+    cudaMemcpy(CPU.data(), X, sizeof(T)*total, cudaMemcpyDeviceToHost);
 
     std::cout << "Printing dimensions for node " << name << "->grad \n";
     for (int c = 0; c < min(3,ch); ++c)

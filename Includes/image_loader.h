@@ -1,8 +1,9 @@
 #pragma once
 #include "engine.h"
+#include "dataloader.h"
 #include <opencv2/opencv.hpp>
 
-void BPrintImage(const graph &X, const int row_size =0, const int col_size = 0);
+void BPrintImage(const graph &X, const int delay_s, const int row_size =0, const int col_size = 0);
 
 using Text = std::vector<std::string>;
 

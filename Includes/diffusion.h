@@ -39,7 +39,6 @@ class ResidualBlock
 public:
     GraphOperations &go;
     Convolute2D *conv1, *conv2, *skipconv;
-    Identity *skip;
     Linear *time_mlp;
     int in, out, hidden, stride;
 
@@ -54,7 +53,6 @@ class LinearBlock
 public:
     GraphOperations &go;
     Linear *conv1, *conv2, *skipconv;
-    Identity *skip;
     Linear *time_mlp;
     int in, out, hidden, stride;
 

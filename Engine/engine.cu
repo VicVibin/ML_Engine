@@ -254,13 +254,13 @@ void AdamParameter::operator=(const AdamParameter& other)
 {
     if(dim[0] != other.dim[0] || dim[1] != other.dim[1] || dim[2] != other.dim[2] ||  dim[3] != other.dim[3])
     {
-        std::cout << "Shape Mismatch in equator operator of AdamParameter " << X->op_name<< " and " << other.op_name;
-        for(int i=0;i<4; ++i){ std::cout << " x " << X->dim[i]<<"\t";} std::cout << ") " << X->op_name << "shape \n";
+        std::cout << "Shape Mismatch in equator operator of AdamParameter " << this->op_name<< " and " << other.op_name;
+        for(int i=0;i<4; ++i){ std::cout << " x " << this->dim[i]<<"\t";} std::cout << ") " << this->op_name << "shape \n";
         for(int i=0;i<4; ++i){ std::cout << " x " << other.dim[i]<<"\t";} std::cout << ") " << other.op_name<< "shape \n";
         std::exit(1);
     }
     cudaMemcpy(output, other.output, other.total_size * sizeof(float), cudaMemcpyDeviceToDevice);
-    CheckError(X->op_name + " = " other.op_name);
+    CheckError(this->op_name + " = " + other.op_name);
 };
 
 void AdamParameter::update(const bool W)
@@ -1428,7 +1428,7 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const float* ta
     node->forward = [=]()
     {   
         WriteValueAt(node,0.0f,0);
-        idx_mse_kernel<<<bpg,tpb>>>(prediction->output,target, target_idx, node->output, batch,width);  
+        idx_mse_kernel<<<bpg,tpb>>>(prediction->output, target, target_idx, node->output, batch,width);  
     };   
     
     node->backward = [=]()
@@ -1925,7 +1925,7 @@ graph GraphOperations::TANH(const graph& input)
     const int c = input->dim[2];
     const int d = input->dim[3];
     const int tpb = THREADSPERBLOCK;
-    auto node = std::make_shared<NodeBackProp>("Sigmoid", a,b,c,d, 1);
+    auto node = std::make_shared<NodeBackProp>("TANH", a,b,c,d, 1);
     node->inputs = {input};    
     GB += (double)node->total * sizeof(float) / (pow(2,30));
 
@@ -1940,6 +1940,41 @@ graph GraphOperations::TANH(const graph& input)
     node->backward = [=]() 
     {
         deriv_TaNH<<<(node->total+tpb-1)/tpb,tpb>>>(input->output, node->grad,input->grad,node->total);
+        //CheckError("Deriv ReLU in RELU");
+        //isNan(input,1);
+    };
+
+    node->free =  [=](){node->clear();};
+
+    node->zero_grad = [=](){Zerograd(node);};
+
+    
+    return node; 
+    }
+
+graph GraphOperations::GELU(const graph& input)
+{
+
+    const int a = input->dim[0];
+    const int b = input->dim[1];
+    const int c = input->dim[2];
+    const int d = input->dim[3];
+    const int tpb = THREADSPERBLOCK;
+    auto node = std::make_shared<NodeBackProp>("GELU", a,b,c,d, 1);
+    node->inputs = {input};    
+    GB += (double)node->total * sizeof(float) / (pow(2,30));
+
+    node->forward = [=]() 
+    {   
+        //isNan(input);
+        GeLU<<<(node->total+tpb-1)/tpb,tpb>>>(input->output,node->output, node->total); // Assignment operation
+        //CheckError("RELU in RELU forward");
+
+    };
+
+    node->backward = [=]() 
+    {
+        deriv_GeLU<<<(node->total+tpb-1)/tpb,tpb>>>(input->output, node->grad,input->grad,node->total);
         //CheckError("Deriv ReLU in RELU");
         //isNan(input,1);
     };
@@ -2576,7 +2611,6 @@ void GraphOperations::forward(const graph&X, const bool show)
     {
         if (node->forward) 
         {  
-            //std::cout << "Calling node->forward " + node->op_name + "\n";
             node->forward();
             if(show) printHeadGPU(node);
             //CheckError(node->op_name + "forward");
@@ -2614,7 +2648,7 @@ void GraphOperations::zero_grad(const graph&X, const bool show)
     for (auto it = nodes.rbegin(); it != nodes.rend(); ++it){   
     if ((*it)->zero_grad)
     {
-        if(show) std::cout << "Zeroing gradient of" + (*it)->op_name + "\n";
+        //std::cout << "Zeroing gradient of" + (*it)->op_name + "\n";
         (*it)->zero_grad();
         //CheckError((*it)->op_name);
     }}
@@ -2638,31 +2672,22 @@ void GraphOperations::printParams(const graph&X, const bool show)
     if (node->printparams) node->printparams(show);}
 }
 
-void GraphOperations::clear_graph(const graph&X, const bool show)
+void GraphOperations::clear_graph(const graph&X)
 {
     if(X) nodes = topological_sort(X);
     for (auto &node: nodes)
     {
-
-        if(node->free)
-        {
-            if(show) std::cout << "Freeing node: " << node->op_name + "\n";
-            node->free()
-        };
+        if(node->free)node->free();
     }
     nodes.clear();
 }
 
-void GraphOperations::clean_clear_graph(const graph&X, const bool show)
+void GraphOperations::clean_clear_graph(const graph&X)
 {
     if(X) nodes = topological_sort(X);
     for (auto &node: nodes)
     {
-        if(node->free)
-        {
-            if(show) std::cout << "Clean clearing node: " << node->op_name + "\n";
-            node->free()
-        };
+        if(node->free)node->free();
         if(node->serious_free) node->serious_free();
     }
 }

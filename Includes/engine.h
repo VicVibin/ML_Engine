@@ -149,6 +149,7 @@ public:
     graph RELU(const graph& input);
     graph SILU(const graph& input);
     graph TANH(const graph& input);
+    graph GELU(const graph& input);
     graph SIGMOID(const graph& input);
     graph LeakyRELU(const graph& input);
 

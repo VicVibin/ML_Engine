@@ -7,10 +7,25 @@
 
 static constexpr int GRID_W   = 20;
 static constexpr int GRID_H   = 20;
-static constexpr int OBS_DIM  = 14;  
+static constexpr int OBS_DIM  = 17;  
 static constexpr int ACT_DIM  = 4;
+static constexpr int MAT_TOT = (GRID_W + 2) * (GRID_H + 2);
 
-using STATE_OBS = std::array<float, OBS_DIM>;
+struct STATE_OBS
+{
+    std::array<float, MAT_TOT> matrix{};
+    std::array<float, OBS_DIM> grid{};
+    const int dim[2] = {GRID_W + 2, GRID_H + 2};
+    static constexpr int total = OBS_DIM;
+    static constexpr int mtotal = MAT_TOT;
+    
+    void operator =(const STATE_OBS& other)
+    {
+        matrix = other.matrix;
+        grid  = other.grid;
+    }
+
+};
 
 enum class Action : int { UP = 0, RIGHT = 1, DOWN = 2, LEFT = 3 };
 
@@ -42,7 +57,7 @@ public:
         return;
     }
 
-    StepResult step(Action a)
+    StepResult Obstep(Action a)
     {
         const int dx[4] = { 0,  1, 0, -1};
         const int dy[4] = {-1,  0, 1,  0};
@@ -93,6 +108,14 @@ public:
     const std::deque<Point>& snake() const { return snake_; }
     Point food()  const { return food_;  }
     int   score() const { return score_; }
+ 
+    STATE_OBS getObs() const
+    {
+        STATE_OBS o;
+        o.grid = gridObs();
+        o.matrix = matrixObs();
+        return o;
+    }
 
 private:
     std::deque<Point> snake_;
@@ -102,6 +125,8 @@ private:
     int               steps_ = 0;
     std::mt19937      rng_;
 
+    bool insideGrid(Point p) const { return ( p.x >= 0 && p.x < GRID_W && p.y >= 0 && p.y < GRID_H);}
+        
     bool isBody(Point p) const
     {
         for (auto& s : snake_) if (s.x == p.x && s.y == p.y) return true;
@@ -115,11 +140,6 @@ private:
         do { food_ = {dx(rng_), dy(rng_)}; } while (isBody(food_));
     }
 
-    // Returns how close the nearest obstacle is in direction (dx,dy),
-    // as a value in (0, 1].  1.0 = wall/body immediately adjacent,
-    // smaller = obstacle further away, 0.0 = clear for all N steps.
-    // This gives the network a proportional "urgency" signal rather
-    // than a flat binary that provides no gradient at distance > 1.
     float dangerN(int dx, int dy, int N) const
     {
         Point h = snake_.front();
@@ -128,7 +148,7 @@ private:
             int nx = h.x + dx * i;
             int ny = h.y + dy * i;
             if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H)
-                return 1.f - (float)(i - 1) / N;   // closer wall → higher value
+                return 1.f - (float)(i - 1) / N;  
             for (auto& s : snake_)
                 if (s.x == nx && s.y == ny)
                     return 1.f - (float)(i - 1) / N;
@@ -136,14 +156,22 @@ private:
         return 0.f;
     }
 
-    STATE_OBS getObs() const
+    float bodyDangerN(int dx, int dy, int max_steps) const 
     {
-        STATE_OBS o{};
+        Point h = snake_.front();
+        for (int step = 1; step <= max_steps; ++step) {
+            Point p = {h.x + dx * step, h.y + dy * step};
+            if (!insideGrid(p)) break;               // stop at wall – not a body danger
+            if (isBody(p))  return 1.0f / step;                  // closer body → higher danger
+        }
+        return 0.0f;
+    }
+
+    std::array<float, OBS_DIM> gridObs() const 
+    {
+        std::array<float, OBS_DIM> o{};
         Point h = snake_.front();
 
-        // ── Relative danger with 4-step proportional lookahead ──────────────
-        // Ahead, left (relative), right (relative)
-        // Value: 1.0 = blocked next cell, 0.25 = blocked 4 cells away, 0.0 = clear
         o[0] = dangerN( dir_.x,  dir_.y,  4);   // straight ahead
         o[1] = dangerN( dir_.y, -dir_.x,  4);   // left  (rotate CCW)
         o[2] = dangerN(-dir_.y,  dir_.x,  4);   // right (rotate CW)
@@ -170,29 +198,43 @@ private:
         // As the snake grows, self-collision risk rises; this lets the network
         // calibrate how cautious to be.
         o[13] = (float)snake_.size() / (float)(GRID_W * GRID_H);
+        o[14] = bodyDangerN( dir_.x,  dir_.y, 4);   // body ahead
+        o[15] = bodyDangerN( dir_.y, -dir_.x, 4);   // body left
+        o[16] = bodyDangerN(-dir_.y,  dir_.x, 4);   // body right
+        return o;
+    };
+
+    std::array<float, MAT_TOT> matrixObs() const 
+    {
+
+        std::array<float, MAT_TOT> o{};
+        constexpr int W = GRID_W + 2;  
+        constexpr int H = GRID_H + 2; 
+
+        auto idx = [&](int px, int py) { return py * W + px; };
+        for (int px = 0; px < W; ++px) 
+        {
+            o[idx(px, 0)]     = -1.f;   // top row
+            o[idx(px, H - 1)] = -1.f;   // bottom row
+        }
+
+        for (int py = 0; py < H; ++py) 
+        {
+            o[idx(0,     py)] = -1.f;   // left col
+            o[idx(W - 1, py)] = -1.f;   // right col
+        }
+        
+        o[idx(food_.x + 1, food_.y + 1)] = 1.f;
+
+        const int n = (int)snake_.size();
+        for (int i = 0; i < n; ++i) {
+            const Point& p = snake_[i];
+            int flat = idx(p.x + 1, p.y + 1);
+
+            if (i == 0) { o[flat] = 0.8f;} 
+            else { float t = (n > 2) ? (float)(i - 1) / (float)(n - 2) : 1.f; o[flat] = 0.5f - t * 0.4f;}
+        }
 
         return o;
-    }
-
-    GRID_OBS getGridObs() const
-    {
-        constexpr int W = GRID_W + 2;
-        constexpr int H = GRID_H + 2;
-        GRID_OBS obs{};  
-        for (int x = 0; x < W; ++x) { obs.grid[0 * W + x] = -1.f; obs.grid[(H-1) * W + x] = -1.f; }
-        // Border: left and right columns
-        
-        for (int y = 0; y < H; ++y) { obs.grid[y * W + 0] = -1.f; obs.grid[y * W + (W-1)] = -1.f; }
-
-        // Snake body
-        for (size_t i = 1; i < snake_.size(); ++i) obs.grid[(snake_[i].y + 1) * W + (snake_[i].x + 1)] = -1.f;
-
-        // Head
-        if (!snake_.empty()) obs.grid[(snake_[0].y + 1) * W + (snake_[0].x + 1)] = 1.f;
-
-        // Food
-        obs.grid[(food_.y + 1) * W + (food_.x + 1)] = 5.f;
-
-        return obs;
     }
 };
