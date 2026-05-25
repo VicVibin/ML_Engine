@@ -5,7 +5,7 @@
 #include <cfloat>
 
 static constexpr int BLOCK_SIZE = 32;
-static constexpr int THREADSPERBLOCK = 256;
+static constexpr int THREADSPERBLOCK = 512;
 static constexpr float PIBY2  = 1.57079632679;
 static constexpr float PI  = 3.14159265359;
 using str = std::string;
@@ -38,6 +38,8 @@ __device__ __forceinline__ double warpReduceSum(double val, int offset = 16);
 __device__ __forceinline__ int batch_chan_offset(int flag, int batch_idx, int channel_idx, int num_channels, int inner_size);
 
 __device__ int ceil_div(const int a, const int b);
+
+__global__ void nth_row_kernel(const float* __restrict__ X, float* __restrict__ Y, const int which_row, const int b, const int c, const int h, const int w, const bool deriv);
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, int d0, int d1, int d2, int d3, int i0, int i1, int i2, int i3);
 
@@ -319,7 +321,7 @@ __global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const
 
 __global__ void UnifNoise(float*__restrict__ Y, const long long total_size, const uint64_t seed);
 
-__global__ void GaussianNoise(float* __restrict__ Y, const long long total_size, const uint64_t seed);
+__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const long long total_size, const uint64_t seed);
 
 __global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const long long total_size, const uint64_t seed);
 
@@ -329,12 +331,13 @@ __global__ void BMin(const float* __restrict__ data, float* __restrict__ value, 
 
 __global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr, int batch, int channels, int row, int col, int type);
 
-
 __global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col);
 
 __global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col);
 
 __global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int channels, const int row, const int col, const int mode, const int transposed);
+
+__global__ void Accumulate_l2norm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type);
 
 __global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
 
@@ -350,6 +353,10 @@ void deriv_SoftMax(const float* __restrict__ output,const float* __restrict__ gr
 __global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size);
 
 void SoftMask(const float*__restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int batch, const int channels, const int row, const int col, const int type);
+
+__global__ void SumSquaredSqrtRows(const float* __restrict__ data, float* __restrict__ arr,const int batch, const int channels, const int row, const int col);
+
+__global__ void SumSquaredSqrtCols(const float* __restrict__ data, float* __restrict__ arr,const int batch, const int channels, const int row, const int col);
 
 __global__ void ISNAN(const float* __restrict__ X, const long long total);
 
@@ -406,3 +413,17 @@ __global__ void static_assign_values( const float* __restrict__ traj, const floa
 __global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, 
     float* __restrict__ state, float* __restrict__ target, float* __restrict__ target_indices,
     const int* __restrict__ d_idx, const int state_total, const int batch, const int start);
+
+// MNIST STUFF
+
+__global__ void scatter_images_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int*   __restrict__ d_row_idx, int stride, int img_size);
+
+__global__ void onehot_kernel(float* __restrict__ d_labels,  const int* __restrict__ d_row_idx, const float* __restrict__ d_src, int stride);
+
+__global__ void cl_scatter_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int* __restrict__ d_src_rows, int stride, int img_size);
+
+__global__ void cl_target(float* target, const int batch, const int total);
+
+__global__ void nceKernel(const float* __restrict__ X, float* __restrict__ Y, const int num_pos, const int num_neg, const int b);
+
+__global__ void nceDerivKernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ dX, const int num_pos, const int num_neg, const int b);

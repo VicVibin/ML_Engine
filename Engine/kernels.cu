@@ -2,7 +2,7 @@
 
 __device__ __forceinline__ double warpReduceSum(double val, int offset)
 {
-    for (int off = offset; off > 0; off >>= 1)
+    for (int off = offset; off > 0; off >>= 1) 
         val += __shfl_down_sync(0xffffffff, val, off);
     return val;
 }
@@ -60,6 +60,19 @@ __device__ inline void atomicMinFloat(float* __restrict__ addr, float value) {
 }
 
 __device__ int ceil_div(const int a, const int b){return (a + b - 1) / b;}
+
+__global__ void nth_row_kernel(const float* __restrict__ X, float* __restrict__ Y, const int which_row, const int b, const int c, const int h, const int w, const bool deriv)
+{
+    const long long idx = threadIdx.x  +  blockDim.x * blockIdx.x;
+    if(idx  >= b * c * w) return;
+    const long long b_idx = idx / (c * w);
+    const long long c_idx = (idx / w) % c;
+    const long long w_idx = (idx % w);
+    const long long src = b_idx*c*h*w + c_idx*h*w + which_row * w + w_idx;
+    if(deriv) Y[src] += X[idx];
+    else Y[idx] = X[src];
+
+}
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, const int d0, const int d1, const int d2, const int d3, const int i0, const int i1, const int i2, const int i3)
 {
@@ -393,7 +406,7 @@ __global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b,fl
 
     if (row < m && col < p) {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
-        else               c[off_c + row * p + col] += scale * sum;
+        else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
 
@@ -444,7 +457,7 @@ __global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b
 
     if (row < m && col < p) {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
-        else               c[off_c + row * p + col] += scale * sum;
+        else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
 
@@ -499,7 +512,7 @@ __global__ void bcmmATB(const float* __restrict__ a, const float* __restrict__ b
 
     if (row < n && col < p) {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
-        else               c[off_c + row * p + col] += scale * sum;
+        else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
 
@@ -552,9 +565,10 @@ __global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ 
 
     if (row < n && col < p) {
         if (!backward) c[off_c + row * p + col]  = scale * sum;
-        else           c[off_c + row * p + col] += scale * sum;
+        else           atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
+
 
 
 __global__ void LayerMean(const float* __restrict__ data, float* __restrict__ mean,
@@ -1241,7 +1255,7 @@ __global__ void ReLU(const float* __restrict__ input, float* __restrict__ output
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float val  = input[global_idx];
-    if(val < 0){output[global_idx] = 0;}
+    if(val < 0){output[global_idx] = 0.0f;}
     else{output[global_idx] = val;}
 } 
 
@@ -1266,8 +1280,7 @@ __global__ void deriv_LeakyReLU(const float* __restrict__ input, const float* __
 {
     const long long idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= total_size) return;
-    float slope = 0.01f;
-    float mask = (input[idx] < 0.0f) ? slope : 1.0f;
+    float mask = (input[idx] < 0.0f) ? 0.01f : 1.0f;
     grad_out[idx] += grad_in[idx] * mask;
 }
 
@@ -1276,7 +1289,7 @@ __global__ void SiLU(const float* __restrict__ input, float* __restrict__ output
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float val  = input[global_idx];
-    output[global_idx] = val *(1 / (1 + expf(-val)));
+    output[global_idx] = val *(1.0f / (1.0f + expf(-val)));
 } 
 
 __global__ void deriv_SiLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
@@ -1302,9 +1315,9 @@ __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restr
 {
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
-    const float exp2 = expf(2.0 * input[global_idx]);
-    const float negexp2 = 1.0 / exp2;
-    const float deriv = 4.0 / (exp2 + negexp2 + 2.0); 
+    const float exp2 = expf(2.0f * input[global_idx]);
+    const float negexp2 = 1.0f / exp2;
+    const float deriv = 4.0f / (exp2 + negexp2 + 2.0f); 
     grad_out[global_idx] += grad_in[global_idx] * deriv;
 
 }
@@ -1314,9 +1327,9 @@ __global__ void GeLU(const float* __restrict__ input, float* __restrict__ output
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float x = input[global_idx];
-    const float val = sqrtf(2.0 / PI) * (x + 0.044715 * x * x * x);
+    const float val = sqrtf(2.0f / PI) * (x + 0.044715f * x * x * x);
     const float tanh_val = tanhf(val);
-    output[global_idx] = 0.5f * x * (1.0 + tanh_val);
+    output[global_idx] = 0.5f * x * (1.0f + tanh_val);
 
 }
 
@@ -1336,8 +1349,8 @@ __global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ out
 {
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
-    const float negexp = expf( -1.0 * input[global_idx]);
-    output[global_idx] = 1.0 / (1.0 + negexp);
+    const float negexp = expf( -1.0f * input[global_idx]);
+    output[global_idx] = 1.0f / (1.0f + negexp);
 
 }
 
@@ -1346,8 +1359,8 @@ __global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __re
     const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float exp = expf(input[global_idx]);
-    const float negexp = 1.0 / exp;
-    const float deriv = 1.0 / (exp + negexp + 2.0); 
+    const float negexp = 1.0f / exp;
+    const float deriv = 1.0f / (exp + negexp + 2.0f); 
     grad_out[global_idx] += grad_in[global_idx] * deriv;
 
 
@@ -1398,18 +1411,22 @@ __global__ void HeadifyColChannel(const float* __restrict__ input, float* __rest
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= batch * req_channels * row * col) return;
-    const int batch_idx = global_idx / (req_channels*row *col);
-    const int channel_idx = (global_idx / (row * col)) % req_channels;
-    const int outRow = (global_idx % (row * col)) / col;
-    const int outCol = (global_idx % (row * col)) % col;
     if(flag == 0)
     {
+        const int batch_idx = global_idx / (req_channels*row *col);
+        const int channel_idx = (global_idx / (row * col)) % req_channels;
+        const int outRow = (global_idx % (row * col)) / col;
+        const int outCol = (global_idx % (row * col)) % col;
         const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
         output[global_idx] = input[input_idx];
         return;
     }
     if(flag  == 1)
     {
+        const int batch_idx = global_idx / (req_channels*row *col);
+        const int channel_idx = (global_idx / (row * col)) % req_channels;
+        const int outRow = (global_idx % (row * col)) / col;
+        const int outCol = (global_idx % (row * col)) % col;
         const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
         output[input_idx] += input[global_idx];
         return;
@@ -1491,7 +1508,7 @@ __global__ void Vector_Concat(const float* __restrict__ A, float* __restrict__ B
     const long long idx = threadIdx.x + (long long)blockDim.x * blockIdx.x;
     const long long A_size = (long long)batch * channel * row * a_col;
     if (idx >= A_size) return;
-
+    
     const int col_a = idx % a_col;
     const int rem1  = idx / a_col;
     const int r     = rem1 % row;
@@ -1601,7 +1618,6 @@ __global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, in
 
     int col = blockIdx.x; 
     if (col >= columns) return;
-
     int tid = threadIdx.x;
     int total_rows = batch * channels * rows;
     float sum = 0.0f;
@@ -1886,7 +1902,7 @@ __global__ void idx_mse_backward(const float* __restrict__ X, const float* __res
 {
     const int idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= batch) return;
-    const float factor =  2 * (target[idx] - X[idx * col + (int)t_idx[idx]]);
+    const float factor =  2.0 * (X[idx * col + (int)t_idx[idx]] - target[idx]);
     if(last) out[idx] += factor / (float)batch;
     else     out[idx] += factor*grad[0] / (float)batch;
 }
@@ -1953,14 +1969,14 @@ __global__ void UnifNoise(float* __restrict__ Y, const long long total_size, con
     Y[global_idx] = epsilon;
 }
 
-__global__ void GaussianNoise(float* __restrict__ Y, const long long total_size, const uint64_t seed)
+__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const long long total_size, const uint64_t seed)
 {
     long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size) return;
     curandStatePhilox4_32_10_t  state;
 
     curand_init(seed, global_idx, 0, &state);
-    Y[global_idx] = curand_normal(&state);
+    Y[global_idx] = mean + std * curand_normal(&state);
 }
 
 __global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const long long total_size, const uint64_t seed)
@@ -2080,6 +2096,37 @@ __global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ ar
     else           data[global_idx] /= value;
 }
 
+__global__ void Accumulate_l2norm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type)  // 0 = row-wise, 1 = col-wise
+{
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = batch * channels * row * col;
+    if (gid >= total) return;
+    int bc     = gid / (row * col);
+    int row_in = (gid % (row * col)) / col;
+    int col_in = (gid % (row * col)) % col;
+    float dot = 0.0f;
+    if (type == 1)
+    {
+        for (int r = 0; r < row; ++r)
+        {
+            int idx = bc * row * col + r * col + col_in;
+            dot += grad[idx] * normalized[idx];
+        }
+        const float inv_norm = 1.0f / norms[bc * col + col_in];
+        x_grad[gid] += (grad[gid] - normalized[gid] * dot) * inv_norm;
+    }
+    else
+    {
+        for (int c = 0; c < col; ++c)
+        {
+            int idx = bc * row * col + row_in * col + c;
+            dot += grad[idx] * normalized[idx];
+        }
+        const float inv_norm = 1.0f / norms[bc * row + row_in];
+        x_grad[gid] += (grad[gid] - normalized[gid] * dot) * inv_norm;
+    }
+}
+
 __global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv)
 {
     const long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
@@ -2166,8 +2213,7 @@ __global__ void deriv_softmax(const float* __restrict__ output, const float* __r
     }
 }
 
-void SoftMax(const float* __restrict__ data, float* __restrict__ arr,
-             float* __restrict__ output, float* __restrict__ maxArr,
+void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr,
              const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb        = THREADSPERBLOCK;
@@ -2228,6 +2274,39 @@ void deriv_SoftMax(const float* __restrict__ output, const float* __restrict__ g
                                   : batch * channels * col;
     deriv_softmax<<<(elems + tpb - 1) / tpb, tpb>>>(
         output, grad, dinput, batch, channels, row, col, type);
+}
+
+__global__ void SumSquaredSqrtRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col) // Calculate the sum over rows per column
+{
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= batch * channels * col) return;
+
+    int bc = gid / col, c = gid % col;
+    float sum = 0.0f;
+    for (int r = 0; r < row; ++r)
+    {
+        const float val = data[bc * row * col + r * col + c];
+        sum += val * val;
+    } 
+
+    if(sum < 1e-27f) printf("Warning, SumSquaredSqrtRows is basically 0: %f.... nan val incoming", sum);
+    arr[gid] = sqrtf(sum);
+}
+
+__global__ void SumSquaredSqrtCols(const float* __restrict__ data, float* __restrict__ arr,const int batch, const int channels, const int row, const int col) // Calculates the sum over cols per row
+{
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= batch * channels * row) return;
+    int bc = gid / row, r = gid % row;
+    float sum = 0.0f;
+    for (int c = 0; c < col; ++c)
+    {
+        const float val =data[bc * row * col + r * col + c];
+        sum += val * val;
+    }
+    
+    if(sum < 1e-27f) printf("Warning, SumSquaredSqrtCols is basically 0: %f.... nan val incoming", sum);
+    arr[gid] = sqrtf(sum);
 }
 
 __global__ void ISNAN(const float* __restrict__ X, const long long total)
@@ -2437,3 +2516,98 @@ float* __restrict__ target, float* __restrict__ target_indices, const int* __res
         
         state[i * state_total + d] = state_replay[t * state_total + d];
 };
+
+// ----------------- MNIST ----------- //
+
+__global__ void scatter_images_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int*   __restrict__ d_row_idx, int stride, int img_size)
+{
+    int img = blockIdx.x;
+    int pix = threadIdx.x + blockIdx.y * blockDim.x;
+    if (pix >= img_size) return;
+
+    int src_base = d_row_idx[img] * stride + 1; 
+    d_out[img * img_size + pix] = d_src[src_base + pix];
+}
+
+__global__ void onehot_kernel(float* __restrict__ d_labels,  const int* __restrict__ d_row_idx, const float* __restrict__ d_src, int stride)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int lbl = static_cast<int>(d_src[d_row_idx[i] * stride]);
+    d_labels[i * 10 + lbl] = 1.f;
+}
+
+__global__ void cl_scatter_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int* __restrict__ d_src_rows, int stride, int img_size)
+{
+    int sample = blockIdx.x;                    
+    int pix    = threadIdx.x + blockIdx.y * blockDim.x;
+    if (pix >= img_size) return;
+
+    int src_base = d_src_rows[sample] * stride + 1;
+    d_out[sample * img_size + pix] = d_src[src_base + pix];
+}
+
+__global__ void cl_target(float* target, const int batch, const int total) //  assumes [B x 3 x 3]
+{
+    const int id = threadIdx.x + blockIdx.x * blockDim.x;
+    if(id >= total) return;
+    const int mat = id % (total / batch);
+    if(mat == 2 || mat == 5 || mat == 6 || mat == 7) target[id] = -1.f;
+    else target[id] = 1.f;
+};
+
+__global__ void nceKernel(const float* __restrict__ X, float* __restrict__ Y, const int num_pos, const int num_neg, const int b)
+{
+    const long long w_in  = 1 + num_pos + num_neg;
+    const long long w_out = num_pos;
+    const long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= (long long)b * w_out) return;
+
+    const long long b_idx = idx / w_out;
+    const long long p_idx = idx % w_out;       
+
+    float sum_neg = 0.f;
+    for (int i = 0; i < num_neg; ++i) sum_neg += expf(X[b_idx * w_in + 1 + num_pos + i]);
+    const float pos = expf(X[b_idx * w_in + 1 + p_idx]);   
+
+    Y[idx] = -logf(pos / (pos + sum_neg)) / num_pos;
+}
+
+__global__ void nceDerivKernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ dX, const int num_pos, const int num_neg, const int b)
+{
+    const long long w_in  = 1 + num_pos + num_neg;
+    const long long w_out = num_pos;
+    const long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= (long long)b * w_in) return;
+
+    const long long b_idx = idx / w_in;
+    const long long w_idx = idx % w_in;
+
+    if (w_idx == 0) return;                
+
+    const int b_offset = b_idx * w_in;
+    float sum_neg = 0.f;
+    for (int i = 0; i < num_neg; ++i) sum_neg += expf(X[b_offset + 1 + num_pos + i]);
+
+    if (w_idx < 1 + num_pos)
+    {
+        // Positive: w_idx in [1, num_pos], maps to grad index p_idx = w_idx - 1
+        const long long p_idx   = w_idx - 1;
+        const float     g       = grad[b_idx * w_out + p_idx]; 
+        const float     pos     = expf(X[b_offset + w_idx]);
+        dX[idx] += g * (pos / (pos + sum_neg) - 1.f) / num_pos;
+    }
+    
+    else
+    {
+        const float neg = expf(X[b_offset + w_idx]);
+        float d = 0.f;
+        for (int p = 0; p < num_pos; ++p)
+        {
+            const float g   = grad[b_idx * w_out + p];
+            const float pos = expf(X[b_offset + 1 + p]);
+            d += g * neg / (pos + sum_neg);
+        }
+
+        dX[idx] += -d / num_pos;
+    }
+}

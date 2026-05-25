@@ -99,12 +99,18 @@ void NodeBackProp::reshape(std::vector<int> new_dims)
     int new_total = new_dims[0]*new_dims[1]*new_dims[2]*new_dims[3];
     
     if(new_total != total)
-    {std::cerr << "Reshape cannot change total size of tensor\n";
-    std::exit(1);}
+    {
+        std::cerr << "Reshape cannot change total size of tensor\n";
+        std::cout<< "Dimensions for node: " << op_name << "\n";
+        std::cout << "(";for(const auto& d : dim) std::cout << " x " << d <<"\t";std::cout<< ") \n";
+        std::cout << "Attempting to reshape to " << "("; for(const auto& d : new_dims) std::cout << " x " << d <<"\t";std::cout<< ") \n";
+        std::exit(1);
+    }
+    
     for(int i=0;i<4;++i){dim[i] = new_dims[i];}
 }
 
-AdamParameter::AdamParameter(str n, int batch, int out, int in, int row, int col, double norm) : NodeBackProp(n, out, in, row, col,1), lr(LEARNING_RATE), t(1), b1(0.9), b2(0.999), epsilon(1e-8), batch_size(batch), group_norm(norm), weight_decay(0.01f)
+AdamParameter::AdamParameter(str n, int batch, int out, int in, int row, int col, double norm) : NodeBackProp(n, out, in, row, col,1), t(1), b1(0.9), b2(0.999), epsilon(1e-8), batch_size(batch), group_norm(norm), weight_decay(0.01f)
 {
         std::random_device rd;
         const uint64_t seed =  ((uint64_t)rd() << 32) | rd();
@@ -263,7 +269,7 @@ void AdamParameter::operator=(const AdamParameter& other)
     CheckError(this->op_name + " = " + other.op_name);
 };
 
-void AdamParameter::update(const bool W)
+void AdamParameter::update(const float lr, const bool W)
 {   
         const int tpb = THREADSPERBLOCK;
         const int bpg = (total_size + tpb - 1) / tpb;
@@ -285,23 +291,11 @@ void AdamParameter::accumulate_grad(double* global_scale)
 void AdamParameter::gradnorm(const double* global_scale){ScalePtr(grad, global_scale, total_size, 1);};
 
 void Dimension(graph X)
-{   std::cout<< "Dimensions for node: " << X->op_name << "\n";
-    std::cout << "(";
-    for(int i=0;i<4; ++i)
-    {
-        std::cout << " x " << X->dim[i]<<"\t";
-    }
-    std::cout<< ") \n";
+{   std::cout<< "Dimensions for node: " << X->op_name << " "; printf("(%i x %i x %i x %i) \n", X->dim[0],X->dim[1],X->dim[2],X->dim[3]);
 }
 
 void Dimension(AdamParameter* X)
-{   std::cout<< "Dimensions for node: " << X->op_name << "\n";
-    std::cout << "(";
-    for(int i=0;i<4; ++i)
-    {
-        std::cout << " x " << X->dim[i]<<"\t";
-    }
-    std::cout<< ") \n";
+{  std::cout<< "Dimensions for node: " << X->op_name << " " ; printf("(%i x %i x %i x %i) \n", X->dim[0],X->dim[1],X->dim[2],X->dim[3]);
 }
 
 void Zerograd(AdamParameter* X)
@@ -326,8 +320,8 @@ void isNan(graph X, const int type )
     const int bpg = (X->total + tpb-1)/tpb;
     if (type == 0) ISNAN<<<bpg,tpb>>>(X->output, X->total);
     else ISNAN<<<bpg,tpb>>>(X->grad, X->total);
-
-    CheckError(X->op_name + " has nan value");
+    const str val = (type == 0) ? "output" : "grad";
+    CheckError(X->op_name + val + " has nan value");
     return;
 }
 
@@ -337,8 +331,8 @@ void isNan(AdamParameter* X, const int type )
     const int bpg = (X->total + tpb-1)/tpb;
     if (type == 0) ISNAN<<<bpg,tpb>>>(X->output, X->total);
     else ISNAN<<<bpg,tpb>>>(X->grad, X->total);
-
-    CheckError(X->op_name + " has nan value");
+    const str val = (type == 0) ? "output" : "grad";
+    CheckError(X->op_name + val + " has nan value");
     return;
 }
 
@@ -549,7 +543,7 @@ void prepare(const graph &base, const graph &input, const graph &target, int t, 
     cudaMemcpy(input->output, base->output, input->total*sizeof(float), cudaMemcpyDeviceToDevice);
     //CheckError("CudaMemcpy");
 
-    GaussianNoise<<<bpg,tpb>>>(target->output, target->total, seed);
+    GaussianNoise<<<bpg,tpb>>>(target->output, 0.f, 1.f, target->total, seed);
     //CheckError("Gaussian Noise in preparation");
 
     AddNoise<<<bpg, tpb>>>(input->output, target->output,t, T, input->total);
@@ -624,9 +618,9 @@ graph GraphOperations::like(const graph& X, const str name)
 {
     auto node = std::make_shared<NodeBackProp>(name, X->dim[0], X->dim[1], X->dim[2], X->dim[3],1);
     node->inputs = {};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
-    node->forward = [=](){};
-    node->backward= [=](){};
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+    node->forward = [=](){return;};
+    node->backward= [=](){return;};
     node->zero_grad = [=](){Zerograd(node);};
     node->free = [=](){node->clear();};
     return node;
@@ -636,7 +630,7 @@ graph GraphOperations::identity(const graph& X)
 {
     auto node = std::make_shared<NodeBackProp>(X->op_name, X->dim[0], X->dim[1], X->dim[2], X->dim[3],1);
     node->inputs = {};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float)/(1ULL << 30);
     node->forward = [=](){cudaMemcpy(node->output, X->output, sizeof(float)*X->total, cudaMemcpyDeviceToDevice);};
     node->backward= [=](){cudaMemcpy(X->grad, node->grad, sizeof(float)*X->total, cudaMemcpyDeviceToDevice);};
     node->zero_grad = [=](){Zerograd(node);};
@@ -655,6 +649,7 @@ graph GraphOperations::identity_like(const graph& X)
     }
     
     auto node = std::make_shared<NodeBackProp>("Identity Matrix",a,b,c,d,1);
+    GB += (double)(node->total) / (1ULL << 30);
     fillKernel<<<(node->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(node->output, 0.0f, node->total);
     CheckError("Fillkernel for identity_like");
     identityKernel<<<(a*b*c+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(node->output,a,b,c);
@@ -670,7 +665,7 @@ graph GraphOperations::Dropout(const graph& X, const float p, const bool eval)
     const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("Dropout " + X->op_name, a,b,c,d,1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     std::random_device *rd = new std::random_device();
     float* mask = nullptr;
     if(!eval) SafeCudaMalloc("Dropout Mask", mask, node->total);
@@ -713,7 +708,7 @@ graph GraphOperations::HeadifytoChannel(const graph& X, const int channels)
     auto node = std::make_shared<NodeBackProp>("Headified Channel of " + X->op_name, a, channels, c, d / channels,1);
     const int tpb = THREADSPERBLOCK;
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     
     node->forward = [=]()
     {
@@ -738,7 +733,7 @@ graph GraphOperations::DeHeadify(const graph& X)
 {
     const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("Deheadified " + X->op_name, a, 1, c, b*d,1);
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     node->inputs = {X};
     node->forward = [=]()
@@ -771,7 +766,7 @@ graph GraphOperations::Permute(const graph& X, const int i0, const int i1, const
     for(int i = 0; i < 4; i++) {inv_perm[perm[i]] = i;}
     auto node = std::make_shared<NodeBackProp>("Permuted " + X->op_name, pa, pb, pc, pd, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1) / tpb;
     node->forward = [=]()
@@ -800,7 +795,7 @@ graph GraphOperations::Clamp(const graph& X, const float min, const float max)
 
     auto node = std::make_shared<NodeBackProp>("Clamp", batch, channels, a, b, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
 
@@ -828,7 +823,7 @@ graph GraphOperations::PositionalEncoding(const int &t, const int d_model)
 {
 
     auto node = std::make_shared<NodeBackProp>("SinoSuodalPosEncoding", 1, 1, 1, d_model, 1);
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1) / tpb;
     node->inputs = {};
@@ -856,7 +851,7 @@ graph GraphOperations::MatrixPositionalEncoding(const graph& X, const int start_
     const int rows = X->dim[2];
     const int cols = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("MatrixSinoSuodalPosEncoding", batch, 1, rows, cols, 1);
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1) / tpb;
     node->inputs = {X};
@@ -908,7 +903,7 @@ graph GraphOperations::Broadcast_Add(const graph& A, const graph& B)
     auto node = std::make_shared<NodeBackProp>("Broadcast Add", batch, channels, a, b, 1);
     node->inputs = {A, B};
     const int total_size = batch * channels * a * b;
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
     const int B_total = batch * channels * c * d;
@@ -952,9 +947,9 @@ graph GraphOperations::Bias_Add(const graph& A, const graph& B)
         const int a = A->dim[2];
         const int b = A->dim[3];
 
-        auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
+        auto node = std::make_shared<NodeBackProp>("Bias Add", batch, channels, a, b, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1000,7 +995,7 @@ graph GraphOperations::Broadcast_Channel(const graph& A, const graph& B)
 
     auto node = std::make_shared<NodeBackProp>("Broadcast Channel", batch, channels, a, b, 1);
     node->inputs = {A, B};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1038,7 +1033,7 @@ graph GraphOperations::Exp(const graph& X)
 
     auto node = std::make_shared<NodeBackProp>("Exponentiate", batch, channels, a, b, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1071,7 +1066,7 @@ graph GraphOperations::Log(const graph& X)
 
     auto node = std::make_shared<NodeBackProp>("Logarithm", batch, channels, a, b, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1112,7 +1107,7 @@ graph GraphOperations::Add(const graph& A, const graph& B, const bool last)
 
         auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1158,7 +1153,7 @@ graph GraphOperations::Multiply(const graph& A, const graph& B)
 
         auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (node->total+tpb-1)/tpb;
 
@@ -1203,7 +1198,7 @@ graph GraphOperations::Min(const graph& A, const graph& B)
 
         auto node = std::make_shared<NodeBackProp>("Min", batch, channels, a, b, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (node->total+tpb-1)/tpb;
         float* mask;
@@ -1249,7 +1244,7 @@ graph GraphOperations::Max(const graph& A, const graph& B)
 
         auto node = std::make_shared<NodeBackProp>("Max", batch, channels, a, b, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (node->total+tpb-1)/tpb;
         float* mask;
@@ -1286,7 +1281,7 @@ graph GraphOperations::Transpose(const graph& X)
     const int b = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("Transposed" + X->op_name, batch, channels, b, a, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
     node->forward = [=]()
@@ -1306,29 +1301,16 @@ graph GraphOperations::Transpose(const graph& X)
     return node;
     }
 
-graph GraphOperations::Last(const graph& X)
+graph GraphOperations::NthRow(const graph& X, const int row) 
 {
-    if(X->dim[0] != 1 || X->dim[1] != 1)
-    {
-        std::cout << "Dimension mismatch in Last \n";
-        Dimension(X);
-        std::exit(1);
-    }
-
-    auto node = std::make_shared<NodeBackProp>(X->op_name + " Last", X->dim[0], X->dim[1], 1, X->dim[3], 1);
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d= X->dim[3];
+    auto node = std::make_shared<NodeBackProp>(X->op_name + " Last", a,b,1,d, 1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
-    const int offset = X->total - X->dim[3];
-    node->forward = [=]()
-    {
-        //isNan(X);
-        cudaMemcpy(node->output,X->output+offset,node->total*sizeof(float),cudaMemcpyDeviceToDevice);
-        //CheckError("Last forward");
-    };
-
-    node->backward = [=](){};
+    node->forward = [=](){nth_row_kernel<<<bpg,tpb>>>(X->output, node->output, row, a,b,c,d,false);};
+    node->backward = [=](){nth_row_kernel<<<bpg,tpb>>>(node->grad, X->grad, row, a,b,c,d, true);};
     node->free = [=](){node->clear();};
     node->zero_grad = [=](){Zerograd(node);};
     return node;
@@ -1352,7 +1334,7 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
     const int d = target->dim[3];
     auto node = std::make_shared<NodeBackProp>("MSE",1,1,1,1,1);
     node->inputs = {prediction, target};
-    GB += (double)(prediction->total + target->total + 1) * sizeof(float) / (pow(2,30));
+    GB += (double)(prediction->total + target->total + 1) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (prediction->total+tpb-1) / tpb;
     
@@ -1361,19 +1343,24 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
         if(calculate_loss || !last)
         {
             //isNan(prediction); //isNan(target);
+           
             WriteValueAt(node,0.0f,0);
             scalar_mse_kernel<<<bpg, tpb>>>(prediction->output, target->output, node->output, prediction->total);
             //isNan(node);
-            //CheckError("Scalar MSE in MSE forward");
-            if(last) cudaMemcpy(&loss, node->output, sizeof(float), cudaMemcpyDeviceToHost);
+
+            if(last){
+                 printf("Calcuting MSE Loss... \n");
+                CheckError("Scalar MSE in MSE forward");
+                printHeadGPU(node);
+                cudaMemcpy(&loss, node->output, sizeof(float), cudaMemcpyDeviceToHost);
+            } 
         }    
     };
+    
     
     node->backward = [=]()
     {   
         deriv_mse_kernel<<<bpg,tpb>>>(prediction->output, target->output, node->grad, prediction->grad, target->total, last, false);
-        //isNan(prediction, 1);
-        //CheckError("derivative of MSE in MSE backward");
     };
 
     node->free = [=](){node->clear();};
@@ -1389,7 +1376,7 @@ graph GraphOperations::Entropy(const graph& X, const bool last)
     const int b = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("Entropy " + X->op_name,batch,channels,a,b,1);
     node->inputs = {X};
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (X->total+tpb-1)/tpb;
 
@@ -1421,13 +1408,13 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const float* ta
     const int width = prediction->dim[3];
     auto node = std::make_shared<NodeBackProp>("MSE",1,1,1,1,1);
     node->inputs = {prediction};
-    GB += (double)(prediction->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int bpg = (batch + THREADSPERBLOCK - 1 )/ THREADSPERBLOCK;
     constexpr int tpb = THREADSPERBLOCK;
     
     node->forward = [=]()
     {   
-        WriteValueAt(node,0.0f,0);
+        fillKernel<<<1,1>>>(node->output,0.0f, 1);
         idx_mse_kernel<<<bpg,tpb>>>(prediction->output, target, target_idx, node->output, batch,width);  
     };   
     
@@ -1437,7 +1424,7 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const float* ta
     };
     
     node->free = [=](){node->clear();};
-    node->zero_grad = [=](){}; 
+    node->zero_grad = [=](){Zerograd(node);}; 
     return node;
 }
 
@@ -1463,7 +1450,7 @@ graph GraphOperations::CrossEntropy(const graph& prediction, const graph& target
         const int d = target->dim[3];
         auto node = std::make_shared<NodeBackProp>("Cross Entropy Loss",1,1,1,1,1);
         node->inputs = {prediction, target};
-        GB += (double)(prediction->total + target->total + 1) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total + target->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (prediction->total+tpb-1)/tpb;
 
@@ -1516,7 +1503,7 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         SafeCudaMalloc("Softmax array", softmax_arr, batch*channels*c);
         SafeCudaMalloc("Max array", maxArr, batch*channels*c);
         SafeCudaMalloc("SoftMax", softmax, node->total);
-        GB += (double)(node->total + 1) * sizeof(float) / (pow(2,30));
+        GB += (double)(target->total + 1) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (prediction->total+tpb-1) / tpb;
         
@@ -1557,6 +1544,85 @@ graph GraphOperations::SoftMaxCrossEntropy(const graph& prediction, const graph&
         return node;
     }
 
+graph GraphOperations::NCE(const graph& X, const int num_pos, const int num_neg) // []
+{
+    const int b = X->dim[0],  w = X->dim[3];
+
+    if(X->dim[1] != 1 || X->dim[2] != 1)
+    {
+        std::cout << "Function only works on shape [B x 1 x 1 x K] \n ";
+        Dimension(X);
+    }
+
+    if(1 + num_pos + num_neg != w)
+    {
+        printf("Layout issue in the last dimension... Expected 1 + num_pos: %i + num_neg: %i = %i | Last dim: %i",
+        num_pos, num_neg, 1+num_pos+num_neg, w);
+        std::exit(1);
+    }
+    
+    auto node = std::make_shared<NodeBackProp>("NCE", b, 1, 1, num_pos, 1);
+    node->inputs = {X};
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+    const int tpb = THREADSPERBLOCK;
+    const int bpgf = (node->total+tpb-1)/tpb;
+    const int bpgb = (b*w +tpb-1)/tpb;
+
+    node->forward = [=]()
+    {
+        //isNan(X);
+        nceKernel<<<bpgf,tpb>>>(X->output, node->output, num_pos, num_neg, b);
+        //CheckError("NCE Forward");
+    };
+
+    node->backward = [=]()
+    {
+        nceDerivKernel<<<bpgb,tpb>>>(X->output, node->grad, X->grad, num_pos, num_neg, b);
+        //CheckError("NCE Backward");
+    };
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+    }
+
+graph GraphOperations::CSInfoNCE(const graph& prediction, const int num_pos, const int num_neg, const float temperature, const bool last) 
+{        
+ /**
+ * @brief Cosine Information Noise Contrastive Estimation:
+ *
+ * @details
+ * The function Loss assumes the following layout of prediction
+ * [B x (1 + P + N) x D], The first row is the positive anchor, The next P rows are the  positive anchors and the last
+ * N rows are the negative anchors with information dimension D
+ * 
+ * Provide the following information to the Loss function
+ * @param: Predicted [B x (1 + P + N) x D datapoints]. Assume K = (1 + P + N)
+ * @param: The number of positive anchors
+ * @param: The number of negative anchors
+ * @param: Temperature scalar value
+ * @param: Boolean to determine if This is the last layer of the network for node->grad initialization rather than accumulation;
+ */
+    // Use only the first row for the cosine similarity   
+    auto z_norm  = L2Norm(prediction, 0);                            // [B x K x W]
+    auto z_first = NthRow(z_norm, 0);                                // [B x 1 x K]
+    auto similarity = Scale(BMMABT(z_first, z_norm), temperature);   // [B X 1 X K]
+    auto infonce = NCE(similarity, num_pos, num_neg);
+    return BATCHMEAN(infonce);
+}
+
+graph GraphOperations::ContrastLearningTarget(const int batch) // Output matrix: [[1,1,-1],[1,1,-1],[-1,-1,1]]
+{   
+    auto node = std::make_shared<NodeBackProp>("Contrastive Learning Target", batch,1,3,3,1);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total + tpb-1) / tpb;
+    cl_target<<<bpg,tpb>>>(node->output, batch, node->total); 
+    CheckError("Initializing Target");
+    node->forward = [=](){return;};
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
+
 graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m x p
 {
     if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[3] != B->dim[2])
@@ -1570,7 +1636,7 @@ graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m
     const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[3];
     auto node = std::make_shared<NodeBackProp>("BMM", batch, channels, m, p, 1);
     node->inputs = {A,B};
-    GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
     const int bpg = (node->total+tpb-1)/tpb;
     dim3 block(BLOCK_SIZE, BLOCK_SIZE);
@@ -1592,10 +1658,10 @@ graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m
         bcmmATB<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels, m, n, p,1); // ∂B = A^T * ∂Z            //CheckError("MatMul... X^T*∂Z in GraphOperations BMM backward");
     };
         
-        node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd(node);};
-        return node;
-    }
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
 
 graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n * p x n = m x p
 {
@@ -1612,7 +1678,7 @@ graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n * p x n 
         auto node = std::make_shared<NodeBackProp>("BMM-ABT", batch, channels, m, p, 1);
         node->inputs = {A,B};
 
-        GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
         dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
@@ -1654,7 +1720,7 @@ graph GraphOperations::BMMATB(const graph& A, const graph& B) // m x n * m x p =
 
         auto node = std::make_shared<NodeBackProp>("BMMATB", batch, channels, n, p, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total + A->total + B->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
         dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
@@ -1696,7 +1762,7 @@ graph GraphOperations::BMMATBT(const graph& A, const graph& B) // m x n * p x m 
         const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
         auto node = std::make_shared<NodeBackProp>("BMM-ATBT", batch, channels, n, p, 1);
         node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
         dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
@@ -1729,10 +1795,10 @@ graph GraphOperations::SOFTMAX(const graph& X, const int type) // type 0: row-wi
         const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
         auto node = std::make_shared<NodeBackProp>("Softmax", a, b,c,d, 1);
         node->inputs = {X};    
-        GB += (double)node->total * sizeof(float) / (pow(2,30));
         const int arr_size = (type == 0) ? a*b*c : a*b*d;
         const int max_size = (type == 0) ? a*b*c : a*b*d;
         float *arr, *maxArr;
+        GB += (double)(node->total + arr_size + max_size)* sizeof(float) / (1ULL << 30);
         SafeCudaMalloc("Softmax array", arr, arr_size);
         SafeCudaMalloc("Max array", maxArr, max_size);
 
@@ -1768,12 +1834,12 @@ graph GraphOperations::SOFTMASK(const graph& X, const int type) // type 0: row-w
     const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
     auto node = std::make_shared<NodeBackProp>("Softmask", a,b,c,d, 1);
     node->inputs = {X};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
     const int arr_size = (type == 0) ? a*b*c : a*b*d;
     const int max_size = (type == 0) ? a*b*c : a*b*d;
     float* arr, *maxArr;
     SafeCudaMalloc("Softmask array", arr, arr_size);
     SafeCudaMalloc("Max array", maxArr, max_size);
+    GB += (double)(node->total + arr_size + max_size) * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1813,7 +1879,7 @@ graph GraphOperations::GatherAction(const graph& X, const graph& actions) // Act
         const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
         auto node = std::make_shared<NodeBackProp>("Gathering "+X->op_name+" Actions",a,1,1,1,1);
         node->inputs = {X,actions};    
-        GB += (double)node->total * sizeof(float) / (pow(2,30));
+        GB += (double)node->total * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
         const int bpg = (a+tpb-1)/tpb;
         node->forward = [=]() {getactionKernel<<<bpg,tpb>>>(X->output, actions->output, node->output,d,a,false);};
@@ -1825,12 +1891,12 @@ graph GraphOperations::GatherAction(const graph& X, const graph& actions) // Act
 
 };
 
-graph GraphOperations::Scale(const graph& input, const float scale)
+graph GraphOperations::Scale(const graph& input, const float scale, const bool last)
 {
     const int a = input->dim[0], b = input->dim[1], c = input->dim[2], d = input->dim[3];
     auto node = std::make_shared<NodeBackProp>("Scale", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1842,6 +1908,7 @@ graph GraphOperations::Scale(const graph& input, const float scale)
 
     node->backward = [=]() 
     {
+        if(last) fillKernel<<<(node->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(node->grad, 1.0f, node->total);
         ScaleGraph(node->grad, input->grad, scale,node->total,1);
         //CheckError("Deriv Scale in Scale");
         //isNan(input, 1);
@@ -1855,13 +1922,70 @@ graph GraphOperations::Scale(const graph& input, const float scale)
     return node; 
     }
 
+graph GraphOperations::GaussianNoise_like(const graph& X, const float mean, const float std)
+{
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+    auto node = std::make_shared<NodeBackProp>("Noise", a,b,c,d,1);
+    node->inputs = {X};    
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    std::mt19937 rng{std::random_device{}()};
+    node->forward = [=]() mutable
+    {   
+        //isNan(X);
+        GaussianNoise<<<bpg,tpb>>>(node->output,mean,std,node->total, (uint64_t)rng());
+        //CheckError("Scale Value in Scale forward");
+    };
+    node->backward = [=](){return;};
+    node->free =  [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node; 
+}
+
+graph GraphOperations::L2Norm(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
+{
+        const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
+        auto node = std::make_shared<NodeBackProp>("L2Norm",a,b,c,d,1);
+        node->inputs = {X};    
+        const int arr_size = (type == 0) ? a*b*c : a*b*d;
+        float *arr;
+        GB += (double)(node->total + arr_size)* sizeof(float) / (1ULL << 30);
+        SafeCudaMalloc("Softmax array", arr, arr_size);
+        const int tpb = THREADSPERBLOCK;
+        
+        node->forward = [=]() 
+        {   
+            cudaMemcpy(node->output, X->output, sizeof(float)*node->total, cudaMemcpyDeviceToDevice);
+            if(type == 1) SumSquaredSqrtRows<<<(arr_size + tpb-1)/tpb,tpb>>>(node->output,arr,a,b,c,d);
+            else  SumSquaredSqrtCols<<<(arr_size + tpb-1)/tpb,tpb>>>(node->output,arr,a,b,c,d);
+            Scale_arr<<<(node->total + tpb-1)/tpb, tpb>>>(node->output,arr,a,b,c,d,1,type);
+        };
+
+        node->backward = [=]()
+        {
+            Accumulate_l2norm_kernel<<<(node->total + tpb-1)/tpb, tpb>>>(node->grad, node->output, arr, X->grad,a, b, c, d, type);
+            //CheckError("L2Norm");
+        };
+
+        node->free =  [=]()
+        {
+            node->clear();
+            cudaFree(arr);
+        };
+        
+        node->zero_grad = [=](){Zerograd(node);};
+        return node;
+
+    }
+
 graph GraphOperations::RELU(const graph& input)
 {
     const int a = input->dim[0], b = input->dim[1], c = input->dim[2], d = input->dim[3];
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("ReLU", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1892,7 +2016,7 @@ graph GraphOperations::SILU(const graph& input)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("SiLU", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1927,7 +2051,7 @@ graph GraphOperations::TANH(const graph& input)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("TANH", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1962,7 +2086,7 @@ graph GraphOperations::GELU(const graph& input)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("GELU", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -1997,7 +2121,7 @@ graph GraphOperations::SIGMOID(const graph& input)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("Sigmoid", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -2031,7 +2155,7 @@ graph GraphOperations::LeakyRELU(const graph& input)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("LeakyReLU", a,b,c,d, 1);
     node->inputs = {input};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -2077,12 +2201,12 @@ graph GraphOperations::CopyCrop(const graph& input1, const graph& input2) // @Ch
 
         if (condition)
         {
-            GB += 3 * (double)(node->total) * sizeof(float) / (pow(2,30));
+            GB += 3 * (double)(node->total) * sizeof(float) / (1ULL << 30);
             SafeCudaMalloc("Temp of CopyCrop", temp, batch * depth * a * b);
             SafeCudaMalloc("TGrad of CopyCrop",tGrad, batch * depth * a * b);
         }
         
-        else{GB += (double)(node->total) * sizeof(float) / (pow(2,30));}
+        else{GB += (double)(node->total) * sizeof(float) / (1ULL << 30);}
 
         node->forward = [=]()
         {   
@@ -2147,7 +2271,7 @@ graph GraphOperations::CopyConcat(const graph& input1, const graph& input2) // @
             std::exit(1);
     }
    
-        GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     node->forward = [=]()
     {   
             //isNan(input1); //isNan(input2);
@@ -2184,7 +2308,7 @@ graph GraphOperations::VecConcat(const graph_tree& inputs)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("VecConcat", batch, depth, a, total_b, 1);
     node->inputs = inputs;
-    GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]()
     {    
@@ -2233,7 +2357,7 @@ graph GraphOperations::LAYERMEAN(const graph& X)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("LayerMean", a,1,1,1,1);
     node->inputs = {X};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -2245,18 +2369,15 @@ graph GraphOperations::LAYERMEAN(const graph& X)
 
     node->backward = [=]() 
     {
-        LayerMeanGrad<<<(node->total+tpb-1)/tpb,tpb>>>(node->grad, X->grad, a, b, c, d);
+        LayerMeanGrad<<<(node->total+tpb-1)/tpb,tpb>>>(node->grad,X->grad,a,b,c,d);
         //CheckError("LayerMean backward");
         //isNan(X,1);
     };
 
     node->free =  [=](){node->clear();};
-
     node->zero_grad = [=](){Zerograd(node);};
-
-    
     return node; 
-    }
+}
 
 graph GraphOperations::BATCHMEAN(const graph& X)
 {
@@ -2264,7 +2385,7 @@ graph GraphOperations::BATCHMEAN(const graph& X)
     const int tpb = THREADSPERBLOCK;
     auto node = std::make_shared<NodeBackProp>("BatchMean", 1,b,1,1,1);
     node->inputs = {X};    
-    GB += (double)node->total * sizeof(float) / (pow(2,30));
+    GB += (double)node->total * sizeof(float) / (1ULL << 30);
 
     node->forward = [=]() 
     {   
@@ -2304,6 +2425,7 @@ graph GraphOperations::LayerNorm(const graph& X)
     SafeCudaMalloc("LayerNorm  std", std,  a);
     SafeCudaMalloc("LayerNorm ggamma_mean", ggamma_mean, a);
     SafeCudaMalloc("LayerNorm ggammanode_mean", ggammanode_mean,  a);
+    GB += (double)(3 * node->total + 4 * a) * sizeof(float) / (1ULL << 30); 
 
     node->inputs = {X};
 
@@ -2373,6 +2495,7 @@ graph GraphOperations::BatchNorm(const graph& X)
     SafeCudaMalloc("BatchNorm  std", std,  b);
     SafeCudaMalloc("BatchNorm ggamma_mean", ggamma_mean, b);
     SafeCudaMalloc("BatchNorm ggammanode_mean", ggammanode_mean,  b);
+    GB += (double)(3 * node->total + 4 * b) * sizeof(float) / (1ULL << 30); 
     node->inputs = {X};
 
     node->forward = [=]()
@@ -2447,6 +2570,7 @@ graph GraphOperations::GroupNorm(const graph& X, const int group)
     SafeCudaMalloc("GroupNorm  std", std,  a*group);
     SafeCudaMalloc("GroupNorm ggamma_mean", ggamma_mean, a*group);
     SafeCudaMalloc("GroupNorm ggammanode_mean", ggammanode_mean,  a*group);
+    GB += (double)(3 * node->total + 4 * a*group) * sizeof(float) / (1ULL << 30); 
     
     node->inputs = {X};
         
@@ -2517,6 +2641,7 @@ graph GraphOperations::InstanceNorm(const graph & X)
     SafeCudaMalloc("InstanceNorm  std", std,  a*b);
     SafeCudaMalloc("InstanceNorm ggamma_mean", ggamma_mean, a*b);
     SafeCudaMalloc("InstanceNorm ggammanode_mean", ggammanode_mean,  a*b);
+    GB += (double)(3 * node->total + 4 * a*b) * sizeof(float) / (1ULL << 30); 
     
     node->inputs = {X};      
     node->forward = [=]()
@@ -2587,7 +2712,7 @@ void GraphOperations::accumulate(double* global_scale)
         Sqrt_Scale<<<1,1>>>(global_scale,1.0f,0);
 }
 
-void GraphOperations::ParameterUpdate(const graph&X, const bool show) 
+void GraphOperations::ParameterUpdate(const graph&X, const bool show, const float lr, const bool adamw) 
 {
     if(X) nodes = topological_sort(X);
     if (nodes.size() == 0)
@@ -2596,7 +2721,7 @@ void GraphOperations::ParameterUpdate(const graph&X, const bool show)
         return;
     }
 
-    for(auto&node : nodes) if(node->updateParams) node->updateParams();
+    for(auto&node : nodes) if(node->updateParams) node->updateParams(lr, adamw);
 }
 
 void GraphOperations::forward(const graph&X, const bool show) 
@@ -2613,7 +2738,7 @@ void GraphOperations::forward(const graph&X, const bool show)
         {  
             node->forward();
             if(show) printHeadGPU(node);
-            //CheckError(node->op_name + "forward");
+            
         }}
 }
 
@@ -2629,9 +2754,9 @@ void GraphOperations::backward(const graph&X, const bool show)
     {   
         if((*it)->backward) 
         {
-            //std::cout << "Calling node->backward " + (*it)->op_name + "\n";
-            (*it)->backward(); if(show) printHeadGPU((*it),1);
-            //CheckError((*it)->op_name + "backward");
+            (*it)->backward(); 
+            if(show) printHeadGPU((*it),1);
+            
             
         }
     } 
@@ -2774,10 +2899,10 @@ graph Linear::forward(const graph & X)
             B1->gradnorm(global_scale);
         };
 
-        node->updateParams = [=]()
+        node->updateParams = [=](const float lr, const bool adamw)
         {
-            W1->update();
-            B1->update();
+            W1->update(lr, adamw);
+            B1->update(lr, adamw);
         };
 
         node->printparams = [=](const bool full)
@@ -2816,7 +2941,7 @@ graph Convolute2D::forward(const graph& X)
 
     auto node = std::make_shared<NodeBackProp>(name, batch, out, outR, outC, 1);
     node->inputs = {X};
-    go.GB += (double)(node->total) * sizeof(float) / (pow(2,30));
+    go.GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
     const int tpb = THREADSPERBLOCK;
 
     dim3 block_fwd(8, 8, 16);
@@ -2824,9 +2949,7 @@ graph Convolute2D::forward(const graph& X)
 
     dim3 grid_forward((outC + block_fwd.x - 1) / block_fwd.x, (outR + block_fwd.y - 1) / block_fwd.y, (batch * out + block_fwd.z - 1) / block_fwd.z);
     dim3 grid_weight_grad((out + block_wgt.x - 1) / block_wgt.x, (inp + block_wgt.y - 1) / block_wgt.y, (c * d + block_wgt.z - 1) / block_wgt.z);
-    dim3 grid_input_grad((b + block_fwd.x - 1) / block_fwd.x, (a + block_fwd.y - 1) / block_fwd.y,(batch * inp + block_fwd.z - 1) / block_fwd.z);
-
-    
+    dim3 grid_input_grad((b + block_fwd.x - 1) / block_fwd.x, (a + block_fwd.y - 1) / block_fwd.y,(batch * inp + block_fwd.z - 1) / block_fwd.z);    
     node->forward = [=]()
     {
         //isNan(X);
@@ -2871,10 +2994,10 @@ graph Convolute2D::forward(const graph& X)
         bias->gradnorm(global_scale);
     };
     
-    node->updateParams = [=]()
+    node->updateParams = [=](const float lr, const bool adamw)
     {
-        weights->update();
-        bias->update();
+        weights->update(lr, adamw);
+        bias->update(lr, adamw);
     };
     
     node->printparams = [=](const bool full)
@@ -2973,10 +3096,10 @@ graph Convolute2DT::forward(const graph& X)
         bias->gradnorm(global_scale);
     };
 
-    node->updateParams = [=]()
+    node->updateParams = [=](const float lr, const bool adamw)
     {
-        weights->update();
-        bias->update();
+        weights->update(lr, adamw);
+        bias->update(lr, adamw);
     };
 
     node->printparams = [=](const bool full)
@@ -3022,10 +3145,10 @@ Multi_Linear_Residual_Block::Multi_Linear_Residual_Block(GraphOperations& go, co
 void Multi_Linear_Residual_Block::save(std::ofstream& f) const{for(const auto &p : sequence) p->save(f);}
 void Multi_Linear_Residual_Block::load(std::ifstream& f){for(auto&p : sequence) p->load(f);}
 
-void Noise(const graph & input)
+void Noise(const graph & input, const float mean, const float std)
 {
     std::random_device rd;
     const uint64_t seed =  ((uint64_t)rd() << 32) | rd();
-    GaussianNoise<<<(input->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(input->output, input->total, seed);
+    GaussianNoise<<<(input->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(input->output, mean, std, input->total, seed);
     // CheckError("Addition of Gaussian noise in noise kernel");
 }

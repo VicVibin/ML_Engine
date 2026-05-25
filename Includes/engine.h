@@ -37,12 +37,11 @@ struct NodeBackProp
     std::function<void()> free;
     std::function<void()> zero_grad;
     std::function<void()> serious_free;
-    std::function<void()> updateParams;
+    std::function<void(const float lr, const bool adamw)> updateParams;
     std::function<void(const double*)> clipnorm;
     std::function<void(double*)> accumulate;
     std::function<void(const bool full)> printparams;
-    virtual void update(const bool W=ADAMW){};
-    
+    virtual void update(const float lr = LEARNING_RATE, const bool W = ADAMW){};
     NodeBackProp(str name, int batch, int d1, int d2, int d3, int allocation);
     void clear();
     void reshape(std::vector<int> new_dims);
@@ -55,7 +54,7 @@ void  WriteValueAt(const graph& X, const float value, const int& idx, const bool
 
 struct AdamParameter : public NodeBackProp {
     float *m, *v; int t; 
-    float lr, b1, b2, epsilon; 
+    float b1, b2, epsilon; 
     long long total_size;
     int batch_size;
     float group_norm;
@@ -68,7 +67,7 @@ struct AdamParameter : public NodeBackProp {
 
     void load(std::ifstream& f); // Assumes the class structure is the exact same as when saved, otherwise may cause issues
     
-    void update(const bool W = ADAMW) override;
+    void update(const float lr = LEARNING_RATE, const bool W = ADAMW) override;
 
     void accumulate_grad(double* global_scale);
 
@@ -103,11 +102,12 @@ public:
     double GB = 0;
     bool calculate_loss = false;
     float loss;
-    graph identity_like(const graph& X);
     graph track(const graph_tree& X);
     graph identity(const graph& X);
+    graph identity_like(const graph& X);
+    graph GaussianNoise_like(const graph& X, const float mean, const float std);
     graph like(const graph& X, const str name = "");
-    graph Last(const graph& X);
+    graph NthRow(const graph& X, const int row);
     graph Clamp(const graph& X, const float min, const float max);
     graph Permute(const graph& X, int i0, int i1, int i2, int i3);
     graph Dropout(const graph& X, const float drop_prob, const bool eval = false);
@@ -120,7 +120,9 @@ public:
     graph Bias_Add(const graph& A, const graph& B);
     graph Broadcast_Channel(const graph& A, const graph& B);
 
-    graph Scale(const graph& input, const float scale);
+    graph Scale(const graph& input, const float scale, const bool last = false);
+    graph L2Norm(const graph& input, const int type = 1);
+
     graph Add(const graph& A, const graph& B, const bool last = false);
     graph Multiply(const graph& A, const graph& B);
     graph Exp(const graph& X);
@@ -130,8 +132,10 @@ public:
 
     graph MeanSquaredError(const graph& prediction, const graph& target, const bool last);
     graph MeanSquaredError(const graph& prediction, const float* target, const float* target_idx, const bool last);
+    graph NCE(const graph& prediction, const int num_pos, const int num_neg);
+    graph CSInfoNCE(const graph& prediction, const int num_pos, const int num_neg, const float temperature, const bool last);
     graph CrossEntropy(const graph& prediction, const graph& target, const bool last);
-    
+    graph ContrastLearningTarget(const int batch);
 
     graph Entropy(const graph& X, const bool last = false);
     graph SoftMaxCrossEntropy(const graph& prediction, const graph& target, const bool last);
@@ -167,7 +171,7 @@ public:
 
     void clipNorm(double* global_scale);
     void accumulate(double* global_scale); 
-    void ParameterUpdate(const graph&X = nullptr, const bool show = false);
+    void ParameterUpdate(const graph&X = nullptr, const bool show = false, const float lr = LEARNING_RATE, const bool adamw = ADAMW);
     void forward(const graph& X = nullptr, const bool show = false);
     void backward(const graph&X = nullptr, const bool show = false);
     void zero_grad(const graph&X = nullptr, const bool show = false);
@@ -245,59 +249,6 @@ public:
     graph forward(const graph& X);
 };
 
-
-class Conv2D {
-private:
-    GraphOperations go;
-    graph T_node;
-    
-public:
-    int inp, out, c, d, pad, stride;
-    AdamParameter *weights, *bias;
-    str name;
-    /**
-     * @brief For standard convolution call C2D (go, inp, out);
-     * @param name go: GraphOperations reference
-     * @param Input: number of input channels
-     * @param Output: number of output channels
-     * @param C: kernel size row: (default 3)
-     * @param D: kernel size col: (default 3)
-     * @param stride: stride size (default 1)
-     * @param padding: padding size (default 1)
-     * @param param: Name of the operation (default "" )
-     */
-    Conv2D(GraphOperations&go_ref, int Input, int Output, int C=3, int D=3, int stride = 1, int padding = 1, str param = "");
-    void save(std::ofstream& f) const;
-    void load(std::ifstream& f);
-    graph forward(const graph& X);
-};
-
-class Conv2DT {
-private:
-    GraphOperations go;
-    graph T_node;
-    int inp, out, c, d, pad, stride;
-public:
-    AdamParameter *weights, *bias;
-    str name;
-    /**
-     * @brief For transposed convolution call C2DT (go, inp, out);
-     * @param name go: GraphOperations reference
-     * @param Input: number of input channels
-     * @param Output: number of output channels
-     * @param C: kernel size row: (default 3)
-     * @param D: kernel size col: (default 3)
-     * @param stride: stride size (default 1)
-     * @param padding: padding size (default 1)
-     * @param param: Name of the operation (default "" )
-     */
-    Conv2DT(GraphOperations&go_ref, int Input, int Output, int C=2, int D=2, int stride=2, int padding=0, str param="");
-    void save(std::ofstream& f) const;
-    void load(std::ifstream& f);
-    graph forward(const graph& X);
-};
-
-
 class TimeMLPBlock
 {
 
@@ -338,4 +289,4 @@ public:
     void load(std::ifstream& f);
 };
 
-void Noise(const graph & input);
+void Noise(const graph & input, const float mean = 0.f, const float std = 1.f);

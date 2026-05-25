@@ -13,16 +13,21 @@ static constexpr int MAT_TOT = (GRID_W + 2) * (GRID_H + 2);
 
 struct STATE_OBS
 {
-    std::array<float, MAT_TOT> matrix{};
     std::array<float, OBS_DIM> grid{};
+    std::array<float, MAT_TOT> matrix{};
+    std::array<float, MAT_TOT + OBS_DIM> g{};
     const int dim[2] = {GRID_W + 2, GRID_H + 2};
-    static constexpr int total = OBS_DIM;
-    static constexpr int mtotal = MAT_TOT;
+    const int total = grid.size();
+    const int gtotal = g.size();
+    const int mtotal = matrix.size();
     
     void operator =(const STATE_OBS& other)
     {
-        matrix = other.matrix;
+        
         grid  = other.grid;
+        matrix = other.matrix;
+        g = other.g;
+        
     }
 
 };
@@ -112,8 +117,9 @@ public:
     STATE_OBS getObs() const
     {
         STATE_OBS o;
-        o.grid = gridObs();
+        o.g = combinedObs();
         o.matrix = matrixObs();
+        o.grid = gridObs();
         return o;
     }
 
@@ -237,4 +243,60 @@ private:
 
         return o;
     }
+
+    std::array<float, MAT_TOT + OBS_DIM> combinedObs() const
+    {
+        std::array<float, MAT_TOT + OBS_DIM> o{};
+        Point h = snake_.front();
+        constexpr int W = GRID_W + 2;  
+        constexpr int H = GRID_H + 2; 
+
+        auto idx = [&](int px, int py) { return py * W + px; };
+        for (int px = 0; px < W; ++px) 
+        {
+            o[idx(px, 0)]     = -1.f;   // top row
+            o[idx(px, H - 1)] = -1.f;   // bottom row
+        }
+
+        for (int py = 0; py < H; ++py) 
+        {
+            o[idx(0,     py)] = -1.f;   // left col
+            o[idx(W - 1, py)] = -1.f;   // right col
+        }
+        
+        o[idx(food_.x + 1, food_.y + 1)] = 1.f;
+
+        const int n = (int)snake_.size();
+        for (int i = 0; i < n; ++i) {
+            const Point& p = snake_[i];
+            int flat = idx(p.x + 1, p.y + 1);
+
+            if (i == 0) { o[flat] = 0.8f;} 
+            else { float t = (n > 2) ? (float)(i - 1) / (float)(n - 2) : 1.f; o[flat] = 0.5f - t * 0.4f;}
+        }
+        
+        o[W*H+0] = dangerN( dir_.x,  dir_.y,  4); 
+        o[W*H+1] = dangerN( dir_.y, -dir_.x,  4);
+        o[W*H+2] = dangerN(-dir_.y,  dir_.x,  4);  
+        o[W*H+3] = (dir_.x ==  0 && dir_.y == -1) ? 1.f : 0.f; 
+        o[W*H+4] = (dir_.x ==  1 && dir_.y ==  0) ? 1.f : 0.f;  
+        o[W*H+5] = (dir_.x ==  0 && dir_.y ==  1) ? 1.f : 0.f;  
+        o[W*H+6] = (dir_.x == -1 && dir_.y ==  0) ? 1.f : 0.f;  
+        o[W*H+7]  = (food_.x < h.x) ? 1.f : 0.f;   
+        o[W*H+8]  = (food_.x > h.x) ? 1.f : 0.f;
+        o[W*H+9]  = (food_.y < h.y) ? 1.f : 0.f;
+        o[W*H+10] = (food_.y > h.y) ? 1.f : 0.f;   
+        o[W*H+11] = std::abs(food_.x - h.x) / (float)GRID_W;
+        o[W*H+12] = std::abs(food_.y - h.y) / (float)GRID_H;
+        o[W*H+13] = (float)snake_.size() / (float)(GRID_W * GRID_H);
+        o[W*H+14] = bodyDangerN( dir_.x,  dir_.y, 4); 
+        o[W*H+15] = bodyDangerN( dir_.y, -dir_.x, 4); 
+        o[W*H+16] = bodyDangerN(-dir_.y,  dir_.x, 4);
+        
+        
+        return o;
+
+
+    };
+
 };

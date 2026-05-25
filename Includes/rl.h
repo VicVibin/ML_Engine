@@ -111,6 +111,7 @@ struct PPOTrainer
             go.forward();
             go.backward();
             go.ParameterUpdate();
+            CheckError("PPO Loop");
 
         }}
         cudaMemcpy(&ac.pi_loss, go.nodes.end()[-1]->inputs[0]->inputs[0]->output, sizeof(float), cudaMemcpyDeviceToHost);
@@ -150,7 +151,6 @@ struct PPOTrainer
     void returns(const float gamma, const float lam, const float next_val = 0.0f) 
     {
         int N = rep.total;
-        printf("Value of rep.total: %i  == 2048",N);
         std::vector<float> traj(N * 5);
         cudaMemcpy(traj.data(), rep.traj, N * 5 * sizeof(float), cudaMemcpyDeviceToHost);
         std::vector<float> advantages(N), returns(N);

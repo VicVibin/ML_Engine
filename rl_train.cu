@@ -25,6 +25,37 @@ __global__ void replace_targets(const float* X, float* traj, const int total, co
     traj[5 * idx + REPLAY::VALUE] = r + gamma * qmax * (1.f - done);
 }
 
+__global__ void splitter(const float* X, float* Y, float* Z, const int mat_total, const int grid_tot)
+{
+    const int idx = threadIdx.x  + blockIdx.x * blockDim.x;
+    if(idx >= mat_total + grid_tot) return;
+    if(idx < mat_total) {Y[idx] = X[idx];}
+    else{Z[idx -  mat_total] = X[idx];} 
+}
+
+std::pair<graph,graph> SplitGraph(const graph& State)
+{
+    auto X = std::make_shared<NodeBackProp>("State Matrix ", State->dim[0], State->dim[1], GRID_H +2, GRID_W+2, 1);
+    auto Y = std::make_shared<NodeBackProp>(" State Obs Vector", State->dim[0], State->dim[1], 1, OBS_DIM, 1);
+    constexpr int tpb = THREADSPERBLOCK;
+    constexpr int bpg = (MAT_TOT+OBS_DIM+tpb- 1) /tpb;
+    X->forward = [=]()
+    {
+        splitter<<<bpg,tpb>>>(State->output, X->output, Y->output, MAT_TOT, OBS_DIM);
+        CheckError("Splitter");
+    };
+    Y->forward = [=]()
+    {
+        splitter<<<bpg,tpb>>>(State->output, X->output, Y->output, MAT_TOT, OBS_DIM);
+        CheckError("Splitter");
+    };
+    X->zero_grad = [=](){Zerograd(X);};
+    X->free = [=](){X->clear();};
+    Y->zero_grad = [=](){Zerograd(Y);};
+    Y->free = [=](){Y->clear();};
+    return {X, Y};
+};
+
 static constexpr int CELL           = 24;
 static constexpr int GAME_W         = GRID_W * CELL;
 static constexpr int GAME_H         = GRID_H * CELL;
@@ -40,10 +71,11 @@ static constexpr int HIDDEN_DIM = 256;
 static constexpr int MINI_BATCH = 128;
 
 // ======== DQN ==== //
-static constexpr int WARMUP = ROLLOUT - 1;
-static constexpr int DISC_STEPS = 150000;
+static constexpr int DQN_EPOCHS = 4;
+static constexpr int WARMUP = 10 * ROLLOUT - 1;
+static constexpr int DISC_STEPS = 40000;
 static constexpr float GAMMA = 0.99f;
-static constexpr int EQUALIZER = 15418;
+static constexpr int EQUALIZER = 5;
 static constexpr float INIT_EPSILON = 1.0f;
 
 class Actor_Critic
@@ -98,6 +130,86 @@ public:
 
 };
 
+
+/*
+class Actor_Critic
+{
+private:
+    Convolute2D *conv1, *conv2, *conv3;
+    Linear *A1, *A2, *A3, *Q, *V;
+    int action_dim, hidden;
+public:
+    GraphOperations &go;
+    float s, v_loss, entropy;
+    float pi_loss;
+
+    Actor_Critic(GraphOperations& go, const graph& in_state, const int action_dim, const int hidden_dim) 
+        : go(go), action_dim(action_dim), hidden(hidden_dim)
+    {
+        std::cout << "Initializing architecture \n";
+        conv1 = new Convolute2D(go, 1, 3);
+        conv2 = new Convolute2D(go, 3, 3);
+        conv3 = new Convolute2D(go, 3, 1);
+        std::cout << "Initializing Linears \n";
+        A1 = new Linear(go, OBS_DIM, hidden);
+        A2 = new Linear(go, hidden, GRID_W+2);
+        A3 = new Linear(go, MAT_TOT, hidden);
+        std::cout << "Projs \n";
+        Q  = new Linear(go, hidden, action_dim, "Q(a|s)");
+        V  = new Linear(go, hidden, 1, "V(s)");
+    }
+
+    void save(const str& filename) const
+    {
+        std::ofstream f(filename, std::ios::binary);
+        if (!f) 
+        {
+            std::cerr << "Error opening file for saving: " << filename << std::endl;
+            std::exit(1);
+        }
+        conv1->save(f); conv2->save(f); conv3->save(f);
+        A1->save(f); A2->save(f); A3->save(f); Q->save(f); V->save(f);
+        f.close();
+        std::cout << "Model saved successfully to " << filename << "\n";
+    }
+
+    void load(const str& filename)
+    {
+        std::ifstream f(filename, std::ios::binary);
+        if (!f) {
+            std::cerr << "Error opening file for loading: " << filename << std::endl;
+            std::exit(1);
+        }
+        conv1->load(f); conv2->load(f); conv3->load(f);
+        A1->load(f); A2->load(f); A3->load(f); Q->load(f); V->load(f);
+        f.close();
+        std::cout << "Model loaded successfully from " << filename << "\n";
+    }
+
+    std::pair<graph,graph> build_train(const graph& S_t)
+    {
+        auto [matrix, vector] = SplitGraph(S_t);
+        // Matrix
+        auto c1 = go.SILU(conv1->forward(matrix));
+        auto c2 = go.SILU(conv2->forward(c1));
+        auto c3 = go.SILU(conv3->forward(c2));
+
+        // Vector
+        auto f1 = go.SILU(A1->forward(vector));
+        auto f2 = go.SILU(A2->forward(f1));
+
+        auto comb = go.Broadcast_Add(c3, f2);
+        comb->reshape({comb->dim[0], 1, 1, (int)comb->total / comb->dim[0]});
+        comb = A3->forward(comb);
+
+        auto probs = go.SOFTMAX(Q->forward(comb)); probs->op_name = "π(a|s)";
+        return {probs, V->forward(comb)};
+    }
+};
+
+*/
+
+
 class DQN
 {
 private:
@@ -148,6 +260,7 @@ public:
 
     void operator = (const DQN& other)
     {
+        std::cout << "Setting Q_max = Q \n";
         *A1 = *other.A1; 
         *A2 = *other.A2; 
         *Q =  *other.Q; 
@@ -694,7 +807,7 @@ bool runWatchTrain_DQN(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
     auto fill_next_train= std::make_shared<NodeBackProp>("FULL next state",ROLLOUT,1,1,obs.total,1);
 
     DQN Q(go, state, ACT_DIM, HIDDEN_DIM), Qmax(go, next_state, ACT_DIM, HIDDEN_DIM);
-    DQNTrainer<DQN> trainer(go, Q, Qmax, replay, train_state->dim[0], PPO_EPOCHS);
+    DQNTrainer<DQN> trainer(go, Q, Qmax, replay, train_state->dim[0], DQN_EPOCHS);
 
     auto logits      = Q.build_train(state);
     auto next_logits = Qmax.build_train(next_state);
@@ -706,6 +819,7 @@ bool runWatchTrain_DQN(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
     SafeCudaMalloc("Action_idx", action_idx, ROLLOUT);
     SafeCudaMalloc("Target",     target,     ROLLOUT);
 
+    int q_replace = 0;
     int       ep         = 0;
     long long totalSteps = 0;
     int       bufSteps   = 0;
@@ -749,8 +863,7 @@ bool runWatchTrain_DQN(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
         // ====================================== //
 
         go.forward(next_logits);
-        float targ_id = ArgMaxToCPU(next_logits, argmaxindex);
-        seq.value = res.reward + (float)(1 - (int)res.done)*GAMMA * ReadValueAt(next_logits, targ_id);
+        seq.value = res.reward + (float)(1 - (int)res.done)*GAMMA*ReadValueAt(next_logits, ArgMaxToCPU(next_logits, argmaxindex));
 
         // Important values for Computation in DQN Assign copy //
         cudaMemcpy(replay.traj + 5*bufSteps, &seq, sizeof(Transition), cudaMemcpyHostToDevice);
@@ -761,7 +874,7 @@ bool runWatchTrain_DQN(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
             go.clear_graph(logits);
             trainer.update(train_state, target, action_idx);
             logits = Q.build_train(state);
-            if ((totalSteps / ROLLOUT) % EQUALIZER == 0)
+            if (++q_replace % EQUALIZER == 0)
             {
                 Qmax = Q;
                 go.clear_graph(next_logits);
@@ -828,7 +941,7 @@ bool runBlankTrain_DQN(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
     auto fill_next_train = std::make_shared<NodeBackProp>("FULL next state",ROLLOUT,1,1,obs.total,1);
 
     DQN Q(go, state, ACT_DIM, HIDDEN_DIM), Qmax(go, next_state, ACT_DIM, HIDDEN_DIM);
-    DQNTrainer<DQN> trainer(go, Q, Qmax, replay, train_state->dim[0], PPO_EPOCHS);
+    DQNTrainer<DQN> trainer(go, Q, Qmax, replay, train_state->dim[0], DQN_EPOCHS);
 
     auto logits      = Q.build_train(state);
     auto next_logits = Qmax.build_train(next_state);
@@ -840,6 +953,7 @@ bool runBlankTrain_DQN(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
     SafeCudaMalloc("Action_idx", action_idx, ROLLOUT);
     SafeCudaMalloc("Target",     target,     ROLLOUT);
 
+    int q_replace = 0;
     int       ep         = 0;
     long long totalSteps = 0;
     int       bufSteps   = 0;
@@ -938,8 +1052,7 @@ bool runBlankTrain_DQN(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
         // ====================================== //
 
         go.forward(next_logits);
-        float targ_id = ArgMaxToCPU(next_logits, argmaxindex);
-        seq.value = res.reward + (float)(1 - (int)res.done)*GAMMA * ReadValueAt(next_logits, targ_id);
+        seq.value = res.reward + (float)(1 - (int)res.done)* GAMMA*ReadValueAt(next_logits, ArgMaxToCPU(next_logits, argmaxindex));
 
         // Important values for Computation in DQN Assign copy //
         cudaMemcpy(replay.traj + 5*bufSteps, &seq, sizeof(Transition), cudaMemcpyHostToDevice);
@@ -950,7 +1063,7 @@ bool runBlankTrain_DQN(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
             go.clear_graph(logits);
             trainer.update(train_state, target, action_idx);
             logits = Q.build_train(state);
-            if ((totalSteps / ROLLOUT) % EQUALIZER == 0)
+            if (++q_replace % EQUALIZER == 0)
             {
                 Qmax = Q;
                 go.clear_graph(next_logits);
@@ -1000,7 +1113,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
 
     RL_Replay      replay(ROLLOUT, obs.total);
     Actor_Critic   agent(go, STATE, ACT_DIM, HIDDEN_DIM);
-    // agent.load("..snake_ppo.bin");
+    agent.load("../snake_ppo.bin");
     PPOTrainer<Actor_Critic> PPO(go, agent, replay, PPO_EPOCHS, MINI_BATCH);
     Transition seq;
     auto train_state = std::make_shared<NodeBackProp>("PPO State", PPO.batch, STATE->dim[1],STATE->dim[2],STATE->dim[3],1);
@@ -1090,7 +1203,7 @@ bool runWatchTrain_PPO(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm)
             setColor(ren,{0,0,0,255}); SDL_RenderClear(ren);
             drawGameArea(ren,fnt,env,ep,0,0.f,false,false);
             blitText(ren,fntSm,"S=save weights   M=menu   Q=quit",C_DISABLED,4,GAME_H-16);
-            drawPanel(ren,fnt,fntSm,"WATCH TRAIN (PPO)",ep,totalSteps,piLoss,vLoss,entropy,avg,scoreHist,sps,env.score());
+            drawPanel(ren,fnt,fntSm,"WATCH TRAIN (PPO)",ep,totalSteps,piLoss,vLoss,4*entropy,avg,scoreHist,sps,env.score());
             SDL_RenderPresent(ren);
         }
     }
@@ -1157,7 +1270,7 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
         ss << std::fixed << std::setprecision(4);
         ss << "Pi Loss   " << piLoss;  blitTextCentered(ren, fntSm, ss.str(), C_TEXT, cx, y); y += 22; ss.str("");
         ss << "Val Loss  " << vLoss;   blitTextCentered(ren, fntSm, ss.str(), C_TEXT, cx, y); y += 22; ss.str("");
-        ss << "Entropy   " << entropy; blitTextCentered(ren, fntSm, ss.str(), C_TEXT, cx, y); y += 34; ss.str("");
+        ss << "Entropy   " << 4 *entropy; blitTextCentered(ren, fntSm, ss.str(), C_TEXT, cx, y); y += 34; ss.str("");
 
         blitTextCentered(ren, fntSm, "── Score ──", C_ACCENT, cx, y); y += 22;
         ss << std::fixed << std::setprecision(2);
@@ -1261,7 +1374,7 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
                 double totalSec = std::chrono::duration<double>(now - t0).count();
                 std::printf("[ep %6d|steps %9lld|%7.0fsps]pi=%.3f val=%.3f ent=%.3f avgScore=%.2f\n",
                             ep, totalSteps, totalSteps / totalSec,
-                            piLoss, vLoss, entropy, avg);
+                            piLoss, vLoss, 4 * entropy, avg);
                 tPrint = now;
             }
         }
@@ -1275,8 +1388,6 @@ bool runBlankTrain_PPO(SDL_Renderer* ren, TTF_Font* fntMd, TTF_Font* fntSm)
     STATE->clear(); train_state->clear(); cudaFree(argmaxindex);
     return toMenu;
 }
-
-
 
 bool runWatchTrain(SDL_Renderer* ren, TTF_Font* fnt, TTF_Font* fntSm, TTF_Font* fntMd)
 {
