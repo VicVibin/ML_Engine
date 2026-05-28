@@ -1,15 +1,13 @@
 #pragma once
 #include "debugging_utils.h"
 #include "kernels.h"
-#include <vector>
+#include <iomanip>
 #include <functional>
 #include <memory>
-#include <iostream>
 #include <map>
 #include <utility>
 #include <random>
 #include <unordered_set>
-#include <string>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -61,7 +59,7 @@ struct AdamParameter : public NodeBackProp {
     float weight_decay;
 
 
-    AdamParameter(str n, int batch, int out, int in, int row, int col, double norm = NORM);
+    AdamParameter(str n, int out, int in, int row, int col, double norm = NORM);
     
     void save(std::ofstream& f) const;
 
@@ -97,100 +95,107 @@ void prepare(const graph &base, const graph &input, const graph &target, int t, 
 graph_tree topological_sort(const graph& root);
 
 class GraphOperations{
-public:
-    graph_tree nodes;
-    double GB = 0;
-    bool calculate_loss = false;
-    float loss;
-    graph track(const graph_tree& X);
-    graph identity(const graph& X);
-    graph identity_like(const graph& X);
-    graph GaussianNoise_like(const graph& X, const float mean, const float std);
-    graph like(const graph& X, const str name = "");
-    graph NthRow(const graph& X, const int row);
-    graph Clamp(const graph& X, const float min, const float max);
-    graph Permute(const graph& X, int i0, int i1, int i2, int i3);
-    graph Dropout(const graph& X, const float drop_prob, const bool eval = false);
-    graph Transpose(const graph& X);
-    graph HeadifytoChannel(const graph& X, const int new_channels);
-    graph DeHeadify(const graph& X);
-    graph PositionalEncoding(const int &t, const int d_model);
-    graph MatrixPositionalEncoding(const graph& X, const int start_idx = 0);
-    graph Broadcast_Add(const graph& A, const graph& B);
-    graph Bias_Add(const graph& A, const graph& B);
-    graph Broadcast_Channel(const graph& A, const graph& B);
-
-    graph Scale(const graph& input, const float scale, const bool last = false);
-    graph L2Norm(const graph& input, const int type = 1);
-
-    graph Add(const graph& A, const graph& B, const bool last = false);
-    graph Multiply(const graph& A, const graph& B);
-    graph Exp(const graph& X);
-    graph Log(const graph& X);
-    graph Min(const graph& A, const graph& B);
-    graph Max(const graph& A, const graph& B);
-
-    graph MeanSquaredError(const graph& prediction, const graph& target, const bool last);
-    graph MeanSquaredError(const graph& prediction, const float* target, const float* target_idx, const bool last);
-    graph NCE(const graph& prediction, const int num_pos, const int num_neg);
-    graph CSInfoNCE(const graph& prediction, const int num_pos, const int num_neg, const float temperature, const bool last);
-    graph CrossEntropy(const graph& prediction, const graph& target, const bool last);
-    graph ContrastLearningTarget(const int batch);
-
-    graph Entropy(const graph& X, const bool last = false);
-    graph SoftMaxCrossEntropy(const graph& prediction, const graph& target, const bool last);
-
-    graph BMM(const graph& A, const graph& B); // m x n, n x p = m x p
-    graph BMMABT(const graph& A, const graph& B); //  m x n, p x n = m x p
-    graph BMMATB(const graph& A, const graph& B); // m x n, m x p = n x p
-    graph BMMATBT(const graph& A, const graph& B); // m x n, p x m = n x p
-
-    graph SOFTMAX(const graph& X, const int type = 0); // type 0: row-wise, type 1: column-wise
-    graph SOFTMASK(const graph& X, const int type = 0); // type 0: row-wise, type 1: column-wise
-
-    graph GatherAction(const graph& X, const graph& actions);
-
-    graph RELU(const graph& input);
-    graph SILU(const graph& input);
-    graph TANH(const graph& input);
-    graph GELU(const graph& input);
-    graph SIGMOID(const graph& input);
-    graph LeakyRELU(const graph& input);
-
-    graph CopyCrop(const graph& input1, const graph& input2);
-    graph CopyConcat(const graph& input1, const graph& input2);
-    graph VecConcat(const graph_tree& inputs);
-
-    graph LAYERMEAN(const graph& X);
-    graph BATCHMEAN(const graph& X);
-
-    graph LayerNorm(const graph& X);
-    graph BatchNorm(const graph& X);
-    graph GroupNorm(const graph& X, const int group=8);
-    graph InstanceNorm(const graph & X);
-
+private:
+    static bool calculate_loss;
     void clipNorm(double* global_scale);
     void accumulate(double* global_scale); 
+
+public:
+    graph_tree nodes;
+
+    static double GB;
+    static float loss;
+
     void ParameterUpdate(const graph&X = nullptr, const bool show = false, const float lr = LEARNING_RATE, const bool adamw = ADAMW);
-    void forward(const graph& X = nullptr, const bool show = false);
-    void backward(const graph&X = nullptr, const bool show = false);
+    void forward(const graph& X = nullptr, const bool calc_loss = false, const bool show = false, const bool time = false);
+    void backward(const graph&X = nullptr, const bool show = false, const bool time = false);
     void zero_grad(const graph&X = nullptr, const bool show = false);
     void printParams(const graph&X = nullptr, const bool show = false);
     void printNodes(const graph&X = nullptr, const int show = 0);
     void clear_graph(const graph&X = nullptr);
     void clean_clear_graph(const graph&X = nullptr);
+
+    static graph track(const graph_tree& X);
+    static graph identity(const graph& X);
+    static graph ones_like(const graph& X);
+    static graph identity_like(const graph& X);
+    static graph GaussianNoise_like(const graph& X, const float mean, const float std);
+    static graph like(const graph& X, const str name = "");
+    static graph NthRow(const graph& X, const int row);
+    static graph Clamp(const graph& X, const float min, const float max);
+    static graph Permute(const graph& X, int i0, int i1, int i2, int i3);
+    static graph Dropout(const graph& X, const float drop_prob, const bool eval = false);
+    static graph Transpose(const graph& X);
+    static graph HeadifytoChannel(const graph& X, const int new_channels);
+    static graph DeHeadify(const graph& X);
+    static graph PositionalEncoding(const int &t, const int d_model);
+    static graph MatrixPositionalEncoding(const graph& X, const int start_idx = 0);
+    static graph Broadcast_Add(const graph& A, const graph& B);
+    static graph Bias_Add(const graph& A, const graph& B);
+    static graph Broadcast_Channel(const graph& A, const graph& B);
+
+    static graph Scale(const graph& input, const float scale, const bool last = false);
+    static graph RMSNorm(const graph& input, const int type = 0);
+
+    static graph Add(const graph& A, const graph& B, const bool last = false);
+    static graph Subtract(const graph& A, const graph& B, const bool last = false);
+    static graph Multiply(const graph& A, const graph& B);
+    static graph Exp(const graph& X);
+    static graph Log(const graph& X);
+    static graph Min(const graph& A, const graph& B);
+    static graph Max(const graph& A, const graph& B);
+
+    static graph MeanSquaredError(const graph& prediction, const graph& target, const bool last);
+    static graph MeanSquaredError(const graph& prediction, const float* target, const float* target_idx, const bool last);
+    static graph NCE(const graph& prediction, const int num_pos, const int num_neg);
+    static graph CSInfoNCE(const graph& prediction, const int num_pos, const int num_neg, const float temperature, const bool last);
+    static graph CrossEntropy(const graph& prediction, const graph& target, const bool last);
+    static graph ContrastLearningTarget(const int batch);
+
+    static graph Entropy(const graph& X, const bool last = false);
+    static graph SoftMaxCrossEntropy(const graph& prediction, const graph& target, const bool last);
+
+    static graph BMM(const graph& A, const graph& B); // m x n, n x p = m x p
+    static graph BMMABT(const graph& A, const graph& B); //  m x n, p x n = m x p
+    static graph BMMATB(const graph& A, const graph& B); // m x n, m x p = n x p
+    static graph BMMT(const graph& A, const graph& B); // m x n, p x m = n x p
+
+    static graph SOFTMAX(const graph& X, const int type = 0); // type 0: row-wise, type 1: column-wise
+    static graph SOFTMASK(const graph& X, const int type = 0); // type 0: row-wise, type 1: column-wise
+
+    static graph GatherAction(const graph& X, const graph& actions);
+
+    static graph RELU(const graph& input);
+    static graph SILU(const graph& input);
+    static graph TANH(const graph& input);
+    static graph GELU(const graph& input);
+    static graph SIGMOID(const graph& input);
+    static graph LeakyRELU(const graph& input);
+
+    static graph CopyCrop(const graph& input1, const graph& input2);
+    static graph CopyConcat(const graph& input1, const graph& input2);
+    static graph VecConcat(const graph_tree& inputs);
+
+    static graph LAYERMEAN(const graph& X);
+    static graph BATCHMEAN(const graph& X);
+
+    static graph LayerNorm(const graph& X);
+    static graph BatchNorm(const graph& X);
+    static graph GroupNorm(const graph& X, const int group=8);
+    static graph InstanceNorm(const graph & X);
 };
 
 class Linear
 { 
 private: 
     int in, out;
+    const bool bias;
 public:
     GraphOperations &go;
     AdamParameter *W1;
     AdamParameter *B1;
     str op_name = "Linear Layer";
-    Linear(GraphOperations &go_ref, const int input, const int output, const str name = "");
+    Linear(GraphOperations &go_ref, const int input, const int output, const str name = "", const bool bias = true);
     graph forward(const graph & X);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
@@ -276,12 +281,15 @@ public:
     graph forward(const graph& X, ActFn activation, NormFn norm)
     {
         auto H = sequence[0]->forward(X);
-        for (int r = 0; r < residuals; ++r){
-        auto A = H; 
-        for (int j = 0; j < layers; ++j){
-            int idx = r * layers + j + 1; 
-            if(idx < residuals * layers) A = std::invoke(activation, go, sequence[idx]->forward(A));
-        } H = std::invoke(norm, go, go.Add(H,A));}
+        for (int r = 0; r < residuals; ++r)
+        {
+            auto A = H; 
+            for (int j = 0; j < layers; ++j){
+                int idx = r * layers + j + 1; 
+                if(idx < residuals * layers) A = activation(sequence[idx]->forward(A));
+            } H = norm(go.Add(H,A));
+        }
+
         return sequence[residuals * layers]->forward(H);
     }
 
@@ -290,3 +298,11 @@ public:
 };
 
 void Noise(const graph & input, const float mean = 0.f, const float std = 1.f);
+
+inline graph operator +(const graph &A, const graph &B) {return GraphOperations::Add(A,B);}
+inline graph operator -(const graph &A, const graph &B) {return GraphOperations::Subtract(A,B);}
+inline graph operator *(const graph &A, const graph &B) {return GraphOperations::Multiply(A,B);}
+
+
+
+

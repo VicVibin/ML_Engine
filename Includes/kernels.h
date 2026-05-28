@@ -70,7 +70,7 @@ __global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b
 __global__ void bcmmATB(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
                     const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
 
-__global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
+__global__ void bcmmT(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, const  int batch_size, const int num_channels, const int m, const int n, const int p,
                     const int backward = 0, const int A = 3, const int B = 3, const int C = 3, const float scale = 1);
 
 
@@ -337,7 +337,7 @@ __global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr,
 
 __global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int channels, const int row, const int col, const int mode, const int transposed);
 
-__global__ void Accumulate_l2norm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type);
+__global__ void Accumulate_rmsnorm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type);
 
 __global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
 

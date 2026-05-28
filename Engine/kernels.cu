@@ -196,7 +196,7 @@ __global__ void bmm(const float* __restrict__ a, const float* __restrict__ b, fl
     if(row < m && col < p)
     {
     if(backward == 0) c[batch_offset_c + row * p + col] = scale *sum;
-    else c[batch_offset_c + row * p + col] += scale * sum;
+    else  atomicAdd(&c[batch_offset_c + row * p + col], scale * sum);
     }
 
 }
@@ -242,7 +242,7 @@ __global__ void bmmABT(const float* __restrict__ a, const float* __restrict__ b,
     if(row < m && col < p)
     {
     if(backward ==0) c[batch_offset_c + row * p + col] = scale * sum;
-    else c[batch_offset_c + row * p + col] += scale * sum;
+    else  atomicAdd(&c[batch_offset_c + row * p + col], scale * sum);
     }
 
     
@@ -289,7 +289,7 @@ __global__ void bmmATB(const float* __restrict__ a, const float* __restrict__ b,
     if (row < n && col < p)
     {
     if (backward == 0) c[batch_offset_c + row * p + col] = scale * sum;
-    else c[batch_offset_c + row * p + col] += scale * sum;
+    else  atomicAdd(&c[batch_offset_c + row * p + col], scale * sum);
     }
 
 }
@@ -338,7 +338,7 @@ __global__ void bmmATBT(const float* __restrict__ a, const float* __restrict__ b
 
     if (row < n && col < p) {
         if (!backward) c[batch_offset_c + row * p + col] = scale * sum;
-        else c[batch_offset_c + row * p + col] += scale * sum;
+        else  atomicAdd(&c[batch_offset_c + row * p + col], scale * sum);
     }
 }
 
@@ -360,16 +360,8 @@ __device__ __forceinline__ int batch_chan_offset(int flag, int batch_idx, int ch
 
 __global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b,float* __restrict__ c, 
                     const  int batch_size, const int num_channels, const int m, const int n, const int p,
-                    const int backward, const int A, const int B, const int C, const float scale)
+                    const int backward, const int A, const int B, const int C, const float scale)     // m x n * n x p 00 [1x1], 01 [Bx1], 10 [1xC], 11 [BxC]
 {
-        /*
-    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
-            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
-            2 (bits 10) → [1 × C × …] broadcast batch, has channel
-            3 (bits 11) → [B × C × …] has both
-    */
-
-
     const int linear_idx = blockIdx.z;
     if (linear_idx >= batch_size * num_channels) return;
     const int batch_idx   = linear_idx / num_channels;
@@ -387,24 +379,18 @@ __global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b,fl
     const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, n * p);
     const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
 
-    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
-        s_A[threadIdx.y][threadIdx.x] =
-            (row < m && (t * BLOCK_SIZE + threadIdx.x) < n)
-            ? a[off_a + row * n + t * BLOCK_SIZE + threadIdx.x]
-            : 0.0f;
-
-        s_B[threadIdx.y][threadIdx.x] =
-            (col < p && (t * BLOCK_SIZE + threadIdx.y) < n)
-            ? b[off_b + (t * BLOCK_SIZE + threadIdx.y) * p + col]
-            : 0.0f;
-
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) 
+    {
+        s_A[threadIdx.y][threadIdx.x] = (row < m && (t * BLOCK_SIZE + threadIdx.x) < n) ? a[off_a + row * n + (t * BLOCK_SIZE + threadIdx.x)] : 0.0f;
+        s_B[threadIdx.y][threadIdx.x] = (col < p && (t * BLOCK_SIZE + threadIdx.y) < n) ? b[off_b + (t * BLOCK_SIZE + threadIdx.y) * p + col]: 0.0f;
         __syncthreads();
-        for (int k = 0; k < BLOCK_SIZE; ++k)
-            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+
+        for (int k = 0; k < BLOCK_SIZE; ++k) sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
         __syncthreads();
     }
 
-    if (row < m && col < p) {
+    if (row < m && col < p) 
+    {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
         else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
@@ -412,15 +398,8 @@ __global__ void bcmm(const float* __restrict__ a, const float* __restrict__ b,fl
 
 __global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
                        const int batch_size, const int num_channels, const int m, const int n, const int p,
-                       const int backward, const int A, const int B, const int C, const float scale)
+                       const int backward, const int A, const int B, const int C, const float scale)   // m x n * p x n 00 [1x1], 01 [Bx1], 10 [1xC], 11 [BxC]
 {
-        /*
-    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
-            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
-            2 (bits 10) → [1 × C × …] broadcast batch, has channel
-            3 (bits 11) → [B × C × …] has both
-    */
-
     const int linear_idx = blockIdx.z;
     if (linear_idx >= batch_size * num_channels) return;
     const int batch_idx   = linear_idx / num_channels;
@@ -437,25 +416,18 @@ __global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b
     const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
     const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, p * n);
     const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
-
-    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
-        s_A[threadIdx.y][threadIdx.x] =
-            (row < m && (t * BLOCK_SIZE + threadIdx.x) < n)
-            ? a[off_a + row * n + t * BLOCK_SIZE + threadIdx.x]
-            : 0.0f;
-
-        s_B[threadIdx.y][threadIdx.x] =
-            (col < p && (t * BLOCK_SIZE + threadIdx.y) < n)
-            ? b[off_b + col * n + t * BLOCK_SIZE + threadIdx.y]
-            : 0.0f;
-
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) 
+    {
+        s_A[threadIdx.y][threadIdx.x] = (row < m && (t * BLOCK_SIZE + threadIdx.x) < n) ? a[off_a + row * n + (t * BLOCK_SIZE + threadIdx.x)] : 0.0f;
+        s_B[threadIdx.y][threadIdx.x] = (col < p && (t * BLOCK_SIZE + threadIdx.y) < n) ? b[off_b + col * n + (t * BLOCK_SIZE + threadIdx.y)] : 0.0f;
         __syncthreads();
         for (int k = 0; k < BLOCK_SIZE; ++k)
             sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
         __syncthreads();
     }
 
-    if (row < m && col < p) {
+    if (row < m && col < p) 
+    {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
         else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
@@ -463,70 +435,48 @@ __global__ void bcmmABT(const float* __restrict__ a, const float* __restrict__ b
 
 __global__ void bcmmATB(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
                        const int batch_size, const int num_channels, const int m, const int n, const int p,
-                       const int backward, const int A, const int B, const int C, const float scale)
+                       const int backward, const int A, const int B, const int C, const float scale)   // n x m * n x p 00 [1x1], 01 [Bx1], 10 [1xC], 11 [BxC]
 {
-
-            /*
-    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
-            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
-            2 (bits 10) → [1 × C × …] broadcast batch, has channel
-            3 (bits 11) → [B × C × …] has both
-    */
-
     const int linear_idx = blockIdx.z;
     if (linear_idx >= batch_size * num_channels) return;
+
     const int batch_idx   = linear_idx / num_channels;
     const int channel_idx = linear_idx % num_channels;
 
-    const int row = threadIdx.y + blockIdx.y * blockDim.y;  // → n
-    const int col = threadIdx.x + blockIdx.x * blockDim.x;  // → p
+    const int row = threadIdx.y + blockIdx.y * blockDim.y;
+    const int col = threadIdx.x + blockIdx.x * blockDim.x;  
 
     __shared__ float s_A[BLOCK_SIZE][BLOCK_SIZE];
     __shared__ float s_B[BLOCK_SIZE][BLOCK_SIZE];
 
     float sum = 0.0f;
 
-    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
-    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, m * p);
-    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, n * p);
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, n * m);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, n * p);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
 
-    for (int t = 0; t < (m + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
-        // Aᵀ access: A[k, row]
-        const int k_A = t * BLOCK_SIZE + threadIdx.x;
-        s_A[threadIdx.y][threadIdx.x] =
-            (k_A < m && row < n)
-            ? a[off_a + k_A * n + row]
-            : 0.0f;
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) 
+    {
 
-        const int k_B = t * BLOCK_SIZE + threadIdx.y;
-        s_B[threadIdx.y][threadIdx.x] =
-            (k_B < m && col < p)
-            ? b[off_b + k_B * p + col]
-            : 0.0f;
-
+        s_A[threadIdx.y][threadIdx.x] = (t * BLOCK_SIZE + threadIdx.x < n && row < m) ? a[off_a + (t * BLOCK_SIZE + threadIdx.x) * m + row] : 0.0f;
+        s_B[threadIdx.y][threadIdx.x] = (t * BLOCK_SIZE + threadIdx.y < n && col < p) ? b[off_b + (t * BLOCK_SIZE + threadIdx.y) * p + col] : 0.0f;
+        
         __syncthreads();
-        for (int k = 0; k < BLOCK_SIZE; ++k)
-            sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
+        for (int k = 0; k < BLOCK_SIZE; ++k) sum += s_A[threadIdx.y][k] * s_B[k][threadIdx.x];
         __syncthreads();
     }
 
-    if (row < n && col < p) {
+    if (row < m && col < p) 
+    {
         if (backward == 0) c[off_c + row * p + col]  = scale * sum;
         else               atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
 
-__global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
+__global__ void bcmmT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
                         const int batch_size, const int num_channels, const int m, const int n, const int p,
-                        const int backward,   const int A, const int B, const int C, const float scale)
+                        const int backward,   const int A, const int B, const int C, const float scale) // n x m * p x n 00 [1x1], 01 [Bx1], 10 [1xC], 11 [BxC]
 {
-            /*
-    @brief: 0 (bits 00) → [1 × 1 × …] broadcast both
-            1 (bits 01) → [B × 1 × …] has batch, broadcast channel
-            2 (bits 10) → [1 × C × …] broadcast batch, has channel
-            3 (bits 11) → [B × C × …] has both
-    */
-
     const int linear_idx = blockIdx.z;
     if (linear_idx >= batch_size * num_channels) return;
     const int batch_idx   = linear_idx / num_channels;
@@ -540,22 +490,14 @@ __global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ 
 
     float sum = 0.0f;
 
-    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, m * n);
-    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, p * m);
-    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, n * p);
+    const int off_a = batch_chan_offset(A, batch_idx, channel_idx, num_channels, n * m);
+    const int off_b = batch_chan_offset(B, batch_idx, channel_idx, num_channels, p * n);
+    const int off_c = batch_chan_offset(C, batch_idx, channel_idx, num_channels, m * p);
 
-    for (int t = 0; t < (m + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
-        const int k_A = t * BLOCK_SIZE + threadIdx.x;
-        s_A[threadIdx.y][threadIdx.x] =
-            (k_A < m && row < n)
-            ? a[off_a + k_A * n + row]
-            : 0.0f;
-
-        const int k_B = t * BLOCK_SIZE + threadIdx.y;
-        s_B[threadIdx.y][threadIdx.x] =
-            (k_B < m && col < p)
-            ? b[off_b + col * m + k_B]
-            : 0.0f;
+    for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) 
+    {
+        s_A[threadIdx.y][threadIdx.x] = ((t * BLOCK_SIZE + threadIdx.x) < n && row < m) ? a[off_a + (t * BLOCK_SIZE + threadIdx.x) * m + row] : 0.0f;
+        s_B[threadIdx.y][threadIdx.x] = ((t * BLOCK_SIZE + threadIdx.y) < n && col < p) ? b[off_b + col * n + (t * BLOCK_SIZE + threadIdx.y)] : 0.0f;
 
         __syncthreads();
         for (int k = 0; k < BLOCK_SIZE; ++k)
@@ -563,13 +505,12 @@ __global__ void bcmmATBT(const float* __restrict__ a, const float* __restrict__ 
         __syncthreads();
     }
 
-    if (row < n && col < p) {
+    if (row < m && col < p) 
+    {
         if (!backward) c[off_c + row * p + col]  = scale * sum;
         else           atomicAdd(&c[off_c + row * p + col], scale * sum);
     }
 }
-
-
 
 __global__ void LayerMean(const float* __restrict__ data, float* __restrict__ mean,
                           const int batch, const int channels, const int row, const int col, const bool scale)
@@ -2096,7 +2037,7 @@ __global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ ar
     else           data[global_idx] /= value;
 }
 
-__global__ void Accumulate_l2norm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type)  // 0 = row-wise, 1 = col-wise
+__global__ void Accumulate_rmsnorm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int batch, const int channels, const int row, const int col, const int type)  // 0 = row-wise, 1 = col-wise
 {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     const int total = batch * channels * row * col;
@@ -2532,6 +2473,7 @@ __global__ void scatter_images_kernel(const float* __restrict__ d_src, float* __
 __global__ void onehot_kernel(float* __restrict__ d_labels,  const int* __restrict__ d_row_idx, const float* __restrict__ d_src, int stride)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= 10) return;
     int lbl = static_cast<int>(d_src[d_row_idx[i] * stride]);
     d_labels[i * 10 + lbl] = 1.f;
 }

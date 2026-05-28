@@ -110,7 +110,7 @@ void NodeBackProp::reshape(std::vector<int> new_dims)
     for(int i=0;i<4;++i){dim[i] = new_dims[i];}
 }
 
-AdamParameter::AdamParameter(str n, int batch, int out, int in, int row, int col, double norm) : NodeBackProp(n, out, in, row, col,1), t(1), b1(0.9), b2(0.999), epsilon(1e-8), batch_size(batch), group_norm(norm), weight_decay(0.01f)
+AdamParameter::AdamParameter(str n, int out, int in, int row, int col, double norm) : NodeBackProp(n, out, in, row, col,1), t(1), b1(0.9), b2(0.999), epsilon(1e-8), group_norm(norm), weight_decay(0.01f)
 {
         std::random_device rd;
         const uint64_t seed =  ((uint64_t)rd() << 32) | rd();
@@ -638,6 +638,19 @@ graph GraphOperations::identity(const graph& X)
     return node;
 }
 
+graph GraphOperations::ones_like(const graph& X)
+{
+    const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];    
+    auto node = std::make_shared<NodeBackProp>("Ones of " + X->op_name, a, b, c, d, 1);
+    GB += (double)(node->total) / (1ULL << 30);
+    fillKernel<<<(node->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(node->output, 1.0f, node->total);
+    CheckError("Ones Like Kernel");
+    node->inputs = {X};
+    node->zero_grad = [=](){Zerograd(node);};
+    node->free = [=](){node->clear();};
+    return node;
+}
+
 graph GraphOperations::identity_like(const graph& X)
 {
 
@@ -1136,11 +1149,11 @@ graph GraphOperations::Add(const graph& A, const graph& B, const bool last)
         return node;
     }
 
-graph GraphOperations::Multiply(const graph& A, const graph& B)
+graph GraphOperations::Subtract(const graph& A, const graph& B, const bool last)
     {
         if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
         {
-            std::cout << "Dimension mismatch in Add \n";
+            std::cout << "Dimension mismatch in subtract \n";
             Dimension(A);
             Dimension(B);
             std::exit(1);
@@ -1151,7 +1164,53 @@ graph GraphOperations::Multiply(const graph& A, const graph& B)
         const int a = A->dim[2];
         const int b = A->dim[3];
 
-        auto node = std::make_shared<NodeBackProp>("Add", batch, channels, a, b, 1);
+        auto node = std::make_shared<NodeBackProp>(" Subtract", batch, channels, a, b, 1);
+        node->inputs = {A,B};
+        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (node->total+tpb-1)/tpb;
+
+        node->forward = [=]()
+        {
+            //isNan(A); //isNan(B);
+            ScaleAdd<<<bpg,tpb>>>(A->output, B->output, node->output, -1.f, node->total);
+            //CheckError("Subtract forward");
+            if(last) cudaMemcpy(&loss, node->output, sizeof(float), cudaMemcpyDeviceToHost);
+        };
+
+        node->backward = [=]()
+        {
+            if(last) fillKernel<<<bpg,tpb>>>(node->grad, 1.0f, node->total);
+            Accumulate<<<bpg,tpb>>>(node->grad, A->grad, node->total,  1.f);
+            //CheckError("Subtract backward - A grad");
+
+            Accumulate<<<bpg,tpb>>>(node->grad, B->grad, node->total, -1.f);
+            //CheckError("Subtract backward - B grad");
+        };
+
+        node->free = [=](){node->clear();};
+        node->zero_grad = [=](){Zerograd(node);};
+
+        
+        return node;
+    }
+
+graph GraphOperations::Multiply(const graph& A, const graph& B)
+    {
+        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2] || A->dim[3] != B->dim[3])
+        {
+            std::cout << "Dimension mismatch in Multiply  \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+
+        const int batch = A->dim[0];
+        const int channels = A->dim[1];
+        const int a = A->dim[2];
+        const int b = A->dim[3];
+
+        auto node = std::make_shared<NodeBackProp>("Multiply", batch, channels, a, b, 1);
         node->inputs = {A,B};
         GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
         const int tpb = THREADSPERBLOCK;
@@ -1348,10 +1407,9 @@ graph GraphOperations::MeanSquaredError(const graph& prediction, const graph& ta
             scalar_mse_kernel<<<bpg, tpb>>>(prediction->output, target->output, node->output, prediction->total);
             //isNan(node);
 
-            if(last){
-                 printf("Calcuting MSE Loss... \n");
+            if(last)
+            {
                 CheckError("Scalar MSE in MSE forward");
-                printHeadGPU(node);
                 cudaMemcpy(&loss, node->output, sizeof(float), cudaMemcpyDeviceToHost);
             } 
         }    
@@ -1603,7 +1661,7 @@ graph GraphOperations::CSInfoNCE(const graph& prediction, const int num_pos, con
  * @param: Boolean to determine if This is the last layer of the network for node->grad initialization rather than accumulation;
  */
     // Use only the first row for the cosine similarity   
-    auto z_norm  = L2Norm(prediction, 0);                            // [B x K x W]
+    auto z_norm  = RMSNorm(prediction, 0);                            // [B x K x W]
     auto z_first = NthRow(z_norm, 0);                                // [B x 1 x K]
     auto similarity = Scale(BMMABT(z_first, z_norm), temperature);   // [B X 1 X K]
     auto infonce = NCE(similarity, num_pos, num_neg);
@@ -1623,15 +1681,30 @@ graph GraphOperations::ContrastLearningTarget(const int batch) // Output matrix:
     return node;
 }
 
-graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m x p
+graph GraphOperations::BMM(const graph& A, const graph& B)     // m x n * n x p = m x p
 {
-    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[3] != B->dim[2])
-     {
+    if(A->dim[3] != B->dim[2])
+    {
         std::cout << "Dimension mismatch in BMM \n";
         Dimension(A);
         Dimension(B);
         std::exit(1);
     }
+    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1])
+    {
+        if(A->dim[0] != 1 || B->dim[0] != 1 || A->dim[1] != 1 || B->dim[1] != 1) // Allow broadcasting of batch dimension
+        {
+            std::cout << "Batch size mismatch in BMM \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+    }
+
+    const int A_case = (A->dim[0] > 1) + 2 * (A->dim[1] > 1);
+    const int B_case = (B->dim[0] > 1) + 2 * (B->dim[1] > 1);
+    const int C_case = (A_case > B_case) ? A_case : B_case; 
+
 
     const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[3];
     auto node = std::make_shared<NodeBackProp>("BMM", batch, channels, m, p, 1);
@@ -1646,16 +1719,17 @@ graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m
     node->forward = [=]()
     {   
         //isNan(A); //isNan(B);
-        bcmm<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); //Assignment
+        bcmm<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p,0, A_case, B_case, C_case); //Assignment
         //CheckError("BMM... A * B in GraphOperations BMM forward");
     };
 
     node->backward = [=]()
     {
-        bcmmABT<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n,1); // ∂A = ∂Z * B^T
+        bcmmABT<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n,1, C_case, B_case, A_case); // ∂A = ∂Z * B^T
         //CheckError("BMM.. ∂A = ∂Z * B^T in GraphOperations BMM backward");
 
-        bcmmATB<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels, m, n, p,1); // ∂B = A^T * ∂Z            //CheckError("MatMul... X^T*∂Z in GraphOperations BMM backward");
+        bcmmATB<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels, m, n, p,1, A_case, C_case, B_case); // ∂B = A^T * ∂Z            
+        //CheckError("MatMul... X^T*∂Z in GraphOperations BMM backward");
     };
         
     node->free = [=](){node->clear();};
@@ -1663,133 +1737,173 @@ graph GraphOperations::BMM(const graph& A, const graph& B) // m x n  * n x p = m
     return node;
 }
 
-graph GraphOperations::BMMABT(const graph& A, const graph& B) //  m x n * p x n = m x p
+graph GraphOperations::BMMABT(const graph& A, const graph& B)  // m x n * p x n = m x p
 {
-        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[3] != B->dim[3])
-        {
-            std::cout << "Dimension mismatch in BMMABT \n";
-            Dimension(A);
-            Dimension(B);
-            std::exit(1);
-        }
-
-        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
-
-        auto node = std::make_shared<NodeBackProp>("BMM-ABT", batch, channels, m, p, 1);
-        node->inputs = {A,B};
-
-        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
-
-        dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
-        dim3 grid_dB((n+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for p×n output
-
-        node->forward = [=]()
-        {   
-            //isNan(A); //isNan(B);
-            bcmmABT<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
-            //CheckError("BMM... A * B^T in GraphOperations BMMABT forward");
-        };
-
-        node->backward = [=]()
-        {
-            bcmm<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n, 1);
-            //CheckError("BMM.. ∂A = ∂C × B in GraphOperations BMMABT backward");
-
-            bcmmATB<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, channels, m, p, n, 1);
-            //CheckError("BMMABT... ∂C^T × A in GraphOperations BMMABT backward");
-        };
-    
-        node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd(node);};
-        return node;
-    }
-
-graph GraphOperations::BMMATB(const graph& A, const graph& B) // m x n * m x p = n x p
+    if(A->dim[3] != B->dim[3])
     {
-        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[2])
+        std::cout << "Dimension mismatch in BMMABT \n";
+        Dimension(A);
+        Dimension(B);
+        std::exit(1);
+    }
+    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1])
+    {
+        if(A->dim[0] != 1 || B->dim[0] != 1 || A->dim[1] != 1 || B->dim[1] != 1) // Allow broadcasting of batch dimension
         {
-            std::cout << "Dimension mismatch in BMMATB \n";
+            std::cout << "Batch size mismatch in BMM \n";
             Dimension(A);
             Dimension(B);
             std::exit(1);
         }
-
-        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[3];
-
-        auto node = std::make_shared<NodeBackProp>("BMMATB", batch, channels, n, p, 1);
-        node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
-
-        dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
-        dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×p output
-
-        node->forward = [=]()
-        {   
-            //isNan(A); //isNan(B);
-            bcmmATB<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
-            //CheckError("BMM... A^T * B in GraphOperations BMMATB forward");
-        };
-
-        node->backward = [=]()
-        {
-
-            bcmmABT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, channels, m, p, n, 1);
-            //CheckError("BMM.. ∂A = B × ∂C^T in GraphOperations BMMATB backward");
-
-            bcmm<<<grid_dB, block>>>(A->output, node->grad, B->grad, batch, channels, m, n, p, 1);
-            //CheckError("BMM... ∂B = A × ∂C in GraphOperations BMMATB backward");
-        };
-
-        node->free = [=](){node->clear();};
-        node->zero_grad = [=](){Zerograd(node);};
-        return node;
     }
 
-graph GraphOperations::BMMATBT(const graph& A, const graph& B) // m x n * p x m = n x p
-{
-        if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1] || A->dim[2] != B->dim[3])
-        {
-            std::cout << "Dimension mismatch in BMMATBT \n";
-            Dimension(A);
-            Dimension(B);
-            std::exit(1);
-        }
+    const int A_case = (A->dim[0] > 1) + 2 * (A->dim[1] > 1);
+    const int B_case = (B->dim[0] > 1) + 2 * (B->dim[1] > 1);
+    const int C_case = (A_case > B_case) ? A_case : B_case; 
+
+
+    const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
+    auto node = std::make_shared<NodeBackProp>("BMMABT", batch, channels, m, p, 1);
+    node->inputs = {A,B};
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);   
+    dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    node->forward = [=]()
+    {   
+        //isNan(A); //isNan(B);
+        bcmmABT<<<grid, block>>>(A->output, B->output, node->output, batch,channels,m,n,p,0, A_case, B_case, C_case); //Assignment
+        //CheckError("BMMABT... A * B in GraphOperations BMMABT forward");
+    };
+
+    node->backward = [=]()
+    {
+        bcmm<<<grid_dA, block>>>(node->grad,B->output,A->grad,batch,channels,m,p,n,1,C_case,B_case,A_case); // ∂A = ∂Z * B^T
+        //CheckError("BMMABT.. ∂A = ∂Z * B^T in GraphOperations BMMABT backward");
+
+        bcmmT<<<grid_dB, block>>>(A->output,node->grad,B->grad,batch,channels,m,n,p,1,A_case,C_case,B_case); // ∂B = A^T * ∂Z            
+        //CheckError("BMMABT... X^T*∂Z in GraphOperations BMMABT backward");
+    };
         
-        const int batch = A->dim[0], channels = A->dim[1], m = A->dim[2], n = A->dim[3], p = B->dim[2];
-        auto node = std::make_shared<NodeBackProp>("BMM-ATBT", batch, channels, n, p, 1);
-        node->inputs = {A,B};
-        GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
-
-        dim3 block(BLOCK_SIZE, BLOCK_SIZE);
-        dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
-        dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for m×n output
-        dim3 grid_dB((m+BLOCK_SIZE-1)/BLOCK_SIZE,(p+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);  // for p×m output
-
-        node->forward = [=]()
-        {   
-            //isNan(A); //isNan(B);
-            bcmmATBT<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p); 
-            //CheckError("BMM... A^T * B^T in GraphOperations BMMATBT forward");
-        };
-
-        node->backward = [=]()
-        {
-            bcmmATBT<<<grid_dA, block>>>(B->output, node->grad, A->grad, batch, channels, p, m, n, 1);
-            //CheckError("BMM.. ∂A = B^T × ∂C^T in GraphOperations BMMATBT backward");
-        
-            bcmmATBT<<<grid_dB, block>>>(node->grad, A->output, B->grad, batch, channels, n, p, m, 1);
-            //CheckError("BMMATBT... ∂C^T × A^T in GraphOperations BMMATBT backward");
-        };
-    
     node->free = [=](){node->clear();};
     node->zero_grad = [=](){Zerograd(node);};
     return node;
 }
-    
+
+graph GraphOperations::BMMATB(const graph& A, const graph& B)  // n x m * n x p = m x p
+{
+    if(A->dim[2] != B->dim[2])
+    {
+        std::cout << "Dimension mismatch in BMM \n";
+        Dimension(A);
+        Dimension(B);
+        std::exit(1);
+    }
+    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1])
+    {
+        if(A->dim[0] != 1 || B->dim[0] != 1 || A->dim[1] != 1 || B->dim[1] != 1) // Allow broadcasting of batch dimension
+        {
+            std::cout << "Batch size mismatch in BMM \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+    }
+
+    const int A_case = (A->dim[0] > 1) + 2 * (A->dim[1] > 1);
+    const int B_case = (B->dim[0] > 1) + 2 * (B->dim[1] > 1);
+    const int C_case = (A_case > B_case) ? A_case : B_case; 
+
+    const int batch = A->dim[0], channels = A->dim[1], m = A->dim[3], n = A->dim[2], p = B->dim[3];
+    auto node = std::make_shared<NodeBackProp>("BMMATB", batch, channels, m, p, 1);
+    node->inputs = {A,B};
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);   
+    dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    node->forward = [=]()
+    {   
+        //isNan(A); //isNan(B);
+        bcmmATB<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p,0, A_case, B_case, C_case); //Assignment
+        //CheckError("BMMATB... A * B in GraphOperations BMMATB forward");
+    };
+
+    node->backward = [=]()
+    {
+        bcmmT<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n, 1, C_case, B_case, A_case); // ∂A = ∂Z * B^T
+        //CheckError("BMMT.. ∂A = ∂Z * B^T in GraphOperations BMMATB backward");
+
+        bcmm<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels,  m, n, p, 1, A_case, C_case, B_case); // ∂B = A^T * ∂Z            
+        //CheckError("BMM... X^T*∂Z in GraphOperations BMMATB backward");
+    };
+        
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
+ 
+graph GraphOperations::BMMT(const graph& A, const graph& B) // n x m * p x n = m x p
+{
+    if(A->dim[2] != B->dim[3])
+    {
+        std::cout << "Dimension mismatch in BMMT \n";
+        Dimension(A);
+        Dimension(B);
+        std::exit(1);
+    }
+    if(A->dim[0] != B->dim[0] || A->dim[1] != B->dim[1])
+    {
+        if(A->dim[0] != 1 || B->dim[0] != 1 || A->dim[1] != 1 || B->dim[1] != 1) // Allow broadcasting of batch dimension
+        {
+            std::cout << "Batch size mismatch in BMM \n";
+            Dimension(A);
+            Dimension(B);
+            std::exit(1);
+        }
+    }
+
+    const int A_case = (A->dim[0] > 1) + 2 * (A->dim[1] > 1);
+    const int B_case = (B->dim[0] > 1) + 2 * (B->dim[1] > 1);
+    const int C_case = (A_case > B_case) ? A_case : B_case; 
+
+
+    const int batch = A->dim[0], channels = A->dim[1], m = A->dim[3], n = A->dim[2], p = B->dim[2];
+    auto node = std::make_shared<NodeBackProp>("BMMT", batch, channels, m, p, 1);
+    node->inputs = {A,B};
+    GB += (double)(node->total) * sizeof(float) / (1ULL << 30);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (node->total+tpb-1)/tpb;
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((p+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    dim3 grid_dA((n+BLOCK_SIZE-1)/BLOCK_SIZE,(m+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);   
+    dim3 grid_dB((p+BLOCK_SIZE-1)/BLOCK_SIZE,(n+BLOCK_SIZE-1)/BLOCK_SIZE,batch*channels);
+    node->forward = [=]()
+    {   
+        //isNan(A); //isNan(B);
+        bcmmT<<<grid, block>>>(A->output, B->output, node->output,batch,channels,m,n,p,0, A_case, B_case, C_case); //Assignment
+        //CheckError("BMMT... A * B in GraphOperations BMMT forward");
+    };
+
+    node->backward = [=]()
+    {
+        bcmmATB<<<grid_dA, block>>>(node->grad, B->output, A->grad, batch, channels, m, p, n, 1, C_case, B_case, A_case); // ∂A = ∂Z * B^T
+        //CheckError("BMMATB.. ∂A = ∂Z * B^T in GraphOperations BMMT backward");
+
+        bcmmABT<<<grid_dB, block>>>(A->output, node->grad, B->grad,batch, channels,  m, n, p, 1, A_case, C_case, B_case); // ∂B = A^T * ∂Z            
+        //CheckError("BMMABT... X^T*∂Z in GraphOperations BMMT backward");
+    };
+        
+    node->free = [=](){node->clear();};
+    node->zero_grad = [=](){Zerograd(node);};
+    return node;
+}
+
 graph GraphOperations::SOFTMAX(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
 {
         const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
@@ -1943,10 +2057,10 @@ graph GraphOperations::GaussianNoise_like(const graph& X, const float mean, cons
     return node; 
 }
 
-graph GraphOperations::L2Norm(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
+graph GraphOperations::RMSNorm(const graph& X, const int type) // type 0: row-wise, type 1: column-wise
 {
         const int a = X->dim[0], b = X->dim[1], c = X->dim[2], d = X->dim[3];
-        auto node = std::make_shared<NodeBackProp>("L2Norm",a,b,c,d,1);
+        auto node = std::make_shared<NodeBackProp>("RMSNorm",a,b,c,d,1);
         node->inputs = {X};    
         const int arr_size = (type == 0) ? a*b*c : a*b*d;
         float *arr;
@@ -1964,8 +2078,8 @@ graph GraphOperations::L2Norm(const graph& X, const int type) // type 0: row-wis
 
         node->backward = [=]()
         {
-            Accumulate_l2norm_kernel<<<(node->total + tpb-1)/tpb, tpb>>>(node->grad, node->output, arr, X->grad,a, b, c, d, type);
-            //CheckError("L2Norm");
+            Accumulate_rmsnorm_kernel<<<(node->total + tpb-1)/tpb, tpb>>>(node->grad, node->output, arr, X->grad,a, b, c, d, type);
+            //CheckError("RMSNorm backward");
         };
 
         node->free =  [=]()
@@ -2724,25 +2838,33 @@ void GraphOperations::ParameterUpdate(const graph&X, const bool show, const floa
     for(auto&node : nodes) if(node->updateParams) node->updateParams(lr, adamw);
 }
 
-void GraphOperations::forward(const graph&X, const bool show) 
+void GraphOperations::forward(const graph&X, const bool calc_loss, const bool show, const bool time) 
 {   
     if(X)nodes = topological_sort(X);
+    if(calc_loss) calculate_loss = true;
     if (nodes.size() == 0)
     {
         printf("Warning... Nodes list is empty and forward cannot run.. \n You may have forgotten to topologically sort \n");
         return;
     }
+    
     for (auto& node : nodes)
     {
+        Timing timer(node->op_name + " forward");
+        if(time){ CheckError("Previous"); timer.start();}
         if (node->forward) 
         {  
             node->forward();
             if(show) printHeadGPU(node);
             
-        }}
+        }
+
+        if(time){ CheckError("After " + node->op_name + " forward"); timer.end();}
+    }
+    calculate_loss = false;
 }
 
-void GraphOperations::backward(const graph&X, const bool show) 
+void GraphOperations::backward(const graph&X,const bool show, const bool time) 
 {
     if(X) nodes = topological_sort(X);
     if (nodes.size() == 0)
@@ -2752,13 +2874,14 @@ void GraphOperations::backward(const graph&X, const bool show)
     }
     for(auto it=nodes.rbegin();it!=nodes.rend();++it)
     {   
+        Timing timer((*it)->op_name + " forward");
+        if(time){ CheckError("Previous"); timer.start();}
         if((*it)->backward) 
         {
             (*it)->backward(); 
-            if(show) printHeadGPU((*it),1);
-            
-            
+            if(show) printHeadGPU((*it),1); 
         }
+        if(time){ CheckError("After " + (*it)->op_name + " backward"); timer.end();}
     } 
 }
 
@@ -2785,6 +2908,7 @@ void GraphOperations::printNodes(const graph&X, const int show)
     if (node->zero_grad) 
     {   
     std::cout << "Calling Node: " << node->op_name << "\n"; 
+    Dimension(node);
     if (show == 1) printHeadGPU(node);
     if (show == 2) printHeadGPU(node,1);
     }}
@@ -2817,15 +2941,17 @@ void GraphOperations::clean_clear_graph(const graph&X)
     }
 }
 
-Linear::Linear(GraphOperations &go_ref, const int input, const int output, const str name) : go(go_ref), in(input), out(output) 
+double GraphOperations::GB = 0.0; bool GraphOperations::calculate_loss = false; float GraphOperations::loss = 0.0f;
+
+Linear::Linear(GraphOperations &go_ref, const int input, const int output, const str name, const bool bias) : go(go_ref), in(input), out(output), bias(bias)
 {   
     if (name != "") op_name = name;
-    W1 =  new AdamParameter(name + " W1",1,1,1,in,out);
-    B1 =  new AdamParameter(name + " B1",1,1,1,1,out);     
+    W1 =  new AdamParameter(name + " W1",1,1,in,out);
+    if(bias) B1 =  new AdamParameter(name + " B1",1,1,1,out);     
 }
-void Linear::save(std::ofstream& f) const{W1->save(f);B1->save(f);}
-void Linear::load(std::ifstream& f){W1->load(f);B1->load(f);}
-void Linear::operator=(const Linear& other) {W1 = other.W1; B1 = other.B1;}
+void Linear::save(std::ofstream& f) const{W1->save(f); if(bias) B1->save(f);}
+void Linear::load(std::ifstream& f){W1->load(f); if(bias) B1->load(f);}
+void Linear::operator=(const Linear& other) {W1 = other.W1; if(bias) B1 = other.B1;}
 graph Linear::forward(const graph & X)
 {   
         if(X->dim[3] != W1->dim[2])
@@ -2853,23 +2979,28 @@ graph Linear::forward(const graph & X)
             bcmm<<<grid, block>>>(X->output, W1->output, node->output,batch,channels, row, col, out, 0, 3, 0, 3);
             //CheckError("MatMul... X*W1 in Linear Layer forward");
 
-            BCumAdd<<<(tpb+batch*channels*row-1)/tpb, tpb>>>(node->output, B1->output,batch,channels, row, out); 
+            if(bias) 
+            {
+                BCumAdd<<<(tpb+batch*channels*row-1)/tpb, tpb>>>(node->output, B1->output,batch,channels, row, out);
             //CheckError("Add... X*W1+B1 in Linear Layer forward");
+            }
+            
 
         };
 
         node->backward= [=]()
         {
-            bmmABT<<<grid_dA, block>>>(node->grad, W1->output, X->grad, batch, row, out, col,1,3,0,3);
+            bcmmABT<<<grid_dA, block>>>(node->grad, W1->output, X->grad, batch,channels, row, out, col,1,3,0,3);
             //CheckError("MatMul... ∂Z*W^T in Linear Layer backward");
 
-            bmmATB<<<grid_dB, block>>>(X->output, node->grad, W1->grad, batch, row, col, out,1,3,3,0);
+            bcmmATB<<<grid_dB, block>>>(X->output, node->grad, W1->grad, batch,channels, row, col, out,1,3,3,0);
             //CheckError("MatMul... X^T*∂Z in Linear Layer backward");
 
-            BCompress<<<out, tpb>>>(node->grad, B1->grad, batch, channels, row, out);
-            //CheckError("Compress... Squeeze(∂Z)->∂b in Lineary Layer backward");
-            
-            
+            if(bias)
+            {
+                BCompress<<<out, tpb>>>(node->grad, B1->grad, batch, channels, row, out);
+                //CheckError("Compress... Squeeze(∂Z)->∂b in Lineary Layer backward");
+            }
         };
         
         node->free = [=](){node->clear();};
@@ -2877,38 +3008,38 @@ graph Linear::forward(const graph & X)
         node->serious_free = [=]()
         {
             W1->clear();
-            B1->clear();
+            if(bias) B1->clear();
         };
 
         node->zero_grad = [=]()
         {
             Zerograd(node);
             Zerograd(W1);
-            Zerograd(B1);
+            if(bias) Zerograd(B1);
         };
         
         node->accumulate = [=](double* global_scale)
         {
             W1->accumulate_grad(global_scale);
-            B1->accumulate_grad(global_scale);
+            if(bias) B1->accumulate_grad(global_scale);
         };
 
         node->clipnorm = [=](const double* global_scale)
         {
             W1->gradnorm(global_scale);
-            B1->gradnorm(global_scale);
+            if(bias) B1->gradnorm(global_scale);
         };
 
         node->updateParams = [=](const float lr, const bool adamw)
         {
             W1->update(lr, adamw);
-            B1->update(lr, adamw);
+            if(bias) B1->update(lr, adamw);
         };
 
         node->printparams = [=](const bool full)
         {
-        if(!full){printHeadGPU(W1); printHeadGPU(B1);}
-        else {printGPU(W1); printGPU(B1);};
+        if(!full){printHeadGPU(W1);  if (bias) { printHeadGPU(B1); };}
+        else {printGPU(W1); if (bias) { printGPU(B1); };};
         };
 
         return node;
@@ -2919,8 +3050,8 @@ Convolute2D::Convolute2D(GraphOperations&go_ref, int Input, int Output, int C, i
 : go(go_ref), out(Output), inp(Input), c(C), d(D), pad(padding), stride(stride), name(param)
 {   
     
-        weights = new AdamParameter(name+ " Weight ", 1, out, inp, c, d);
-        bias    = new AdamParameter(name+ " Bias ", 1, 1, out, 1, 1);
+        weights = new AdamParameter(name+ " Weight ", out, inp, c, d);
+        bias    = new AdamParameter(name+ " Bias ",     1, out, 1, 1);
 }
 void Convolute2D::save(std::ofstream& f) const{weights->save(f); bias->save(f);}
 void Convolute2D::load(std::ifstream& f){weights->load(f); bias->load(f);}
@@ -3014,8 +3145,8 @@ graph Convolute2D::forward(const graph& X)
 Convolute2DT::Convolute2DT(GraphOperations& go_ref, int Input, int Output, int C, int D, int stride, int padding, str param) 
     : go(go_ref), out(Output), inp(Input), c(C), d(D), pad(padding), stride(stride), name(param)
 {   
-    weights = new AdamParameter(name + " Weight ", 1, out, inp, c, d);
-    bias    = new AdamParameter(name + " Bias ", 1, 1, out, 1, 1);
+    weights = new AdamParameter(name + " Weight ",  out, inp, c, d);
+    bias    = new AdamParameter(name + " Bias ", 1, out, 1, 1);
 }
 void Convolute2DT::save(std::ofstream& f) const{weights->save(f); bias->save(f);}
 void Convolute2DT::load(std::ifstream& f) {weights->load(f); bias->load(f);}
@@ -3152,3 +3283,4 @@ void Noise(const graph & input, const float mean, const float std)
     GaussianNoise<<<(input->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(input->output, mean, std, input->total, seed);
     // CheckError("Addition of Gaussian noise in noise kernel");
 }
+
