@@ -25,6 +25,29 @@ __device__ __forceinline__ double block_reduce_sum(double val, double* smem)
     return val;                           
 }
 
+__device__ __forceinline__ double warpReduceProd(double val, int offset)
+{
+    for (int off = offset; off > 0; off >>= 1) 
+        val *= __shfl_down_sync(0xffffffff, val, off);
+    return val;
+}
+
+__device__ __forceinline__ double block_reduce_prod(double val, double* smem)
+{
+    const int lane   = threadIdx.x & 31;
+    const int warpId = threadIdx.x >> 5;
+    const int nWarps = (blockDim.x + 31) >> 5;
+
+    val = warpReduceProd(val, 16);      
+
+    if (lane == 0) smem[warpId] = val;
+    __syncthreads();
+
+    val = 1.0;
+    if (threadIdx.x == 0) {for (int w = 0; w < nWarps; ++w) val *= smem[w];}
+    return val;                           
+}
+
 __device__ double atomicAddDouble(double* __restrict__ address, double val)
 {
     unsigned long long int* address_as_ull = (unsigned long long int*)address;
@@ -37,6 +60,15 @@ __device__ double atomicAddDouble(double* __restrict__ address, double val)
     } while (assumed != old);
 
     return __longlong_as_double(old);
+}
+
+__device__ inline void atomicProd(float* __restrict__ addr, float value) {
+    int* addr_as_int = (int*)addr;
+    int old = *addr_as_int, assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(addr_as_int, assumed, __float_as_int(value * __int_as_float(assumed)));
+    } while (assumed != old);
 }
 
 __device__ inline void atomicMaxFloat(float* __restrict__ addr, float value) {
@@ -132,8 +164,7 @@ __global__ void PEncoding(float* __restrict__ X, const int t, const int t_dim, c
     }
 }
 
-__global__ void MatPEncoding(const float* __restrict__ X, float* __restrict__ output, const int batch,
-                             const int row, const int col, const int total, const int start_idx)
+__global__ void MatPEncoding(const float* __restrict__ X, float* __restrict__ output, const int batch, const int row, const int col, const int total, const int start_idx)
 {
     const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total) return;
@@ -153,7 +184,6 @@ __global__ void MatPEncoding(const float* __restrict__ X, float* __restrict__ ou
     }
 
 }
-
 
 __global__ void bmm(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, 
                     const int batch_size, const int m, const int n, const int p, const int backward, 
@@ -201,9 +231,7 @@ __global__ void bmm(const float* __restrict__ a, const float* __restrict__ b, fl
 
 }
 
-__global__ void bmmABT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, 
-                       const int batch_size, const int m, const int n, const int p, const int backward, 
-                       const int A, const int B, const int C, const float scale) //has atomic 
+__global__ void bmmABT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, const int batch_size, const int m, const int n, const int p, const int backward, const int A, const int B, const int C, const float scale) //has atomic 
 {
     int batch_idx = blockIdx.z;
     if (batch_idx >= batch_size) return;
@@ -294,7 +322,7 @@ __global__ void bmmATB(const float* __restrict__ a, const float* __restrict__ b,
 
 }
 
-__global__ void bmmATBT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, 
+__global__ void bmmT(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c, 
                         const int batch_size, const int m, const int n, const int p, const int backward, 
                         const int A, const int B, const int C, const float scale)
 {
@@ -1662,11 +1690,34 @@ __global__ void broadcast_add(const float* __restrict__ X, const float* __restri
     output[global_idx] = X[global_idx] + bias[matrix];
 }
 
+
+__global__ void Write(const float* __restrict__ X, float* __restrict__ Y, const long long total)
+{
+    const long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
+    if(idx >= total) return;
+    Y[idx] = X[idx];
+}
+
+__global__ void Scale_Write(const float* __restrict__ X, float* __restrict__ Y, const long long total, const float scale)
+{
+    const long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
+    if(idx >= total) return;
+    Y[idx] = scale * X[idx];
+}
+
 __global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const double scale)
 {
     const int row_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (row_idx >= total_size){return;}
     Y[row_idx] += scale*X[row_idx];
+
+}
+
+__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const float* scale)
+{
+    const int row_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (row_idx >= total_size){return;}
+    Y[row_idx] += (*scale)*X[row_idx];
 
 }
 
@@ -1962,8 +2013,7 @@ __global__ void BMin(const float* __restrict__ data, float* __restrict__ value, 
     atomicMinFloat(&value[batch_idx], val);
 }
 
-__global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr,
-                        int batch, int channels, int row, int col, int type)
+__global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxArr, int batch, int channels, int row, int col, int type)
 {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -1984,8 +2034,7 @@ __global__ void FindMax(const float* __restrict__ data, float* __restrict__ maxA
     }
 }
 
-__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr,
-                        const int batch, const int channels, const int row, const int col)
+__global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col)
 {
     /*
     Note a very important fact for any future errors, in order to prevent future errors, 
@@ -2002,8 +2051,7 @@ __global__ void SumRows(const float* __restrict__ data, float* __restrict__ arr,
     arr[gid] = sum;
 }
 
-__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr,
-                        const int batch, const int channels, const int row, const int col)
+__global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr, const int batch, const int channels, const int row, const int col)
 {
     /*
     Note a very important fact for any future errors, in order to prevent future errors, 
@@ -2020,9 +2068,7 @@ __global__ void SumCols(const float* __restrict__ data, float* __restrict__ arr,
     arr[gid] = sum;
 }
 
-__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr,
-                          const int batch, const int channels, const int row, const int col,
-                          const int mode, const int transposed)
+__global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ arr, const int batch, const int channels, const int row, const int col, const int mode, const int transposed)
 {
     int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (global_idx >= batch * channels * row * col) return;
@@ -2084,10 +2130,8 @@ __global__ void natural_logarithm(const float* __restrict__ data, const float* _
     else{ output[global_idx] = logf(data[global_idx]);}
 }
 
-__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output,
-                             const float* __restrict__ maxArr,
-                             const int channels, const int row, const int col,
-                             const int type, const long long total_size)
+__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr,
+                             const int channels, const int row, const int col, const int type, const long long total_size)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
@@ -2100,10 +2144,7 @@ __global__ void exponentiate(const float* __restrict__ data, float* __restrict__
     output[idx] = expf(data[idx] - maxArr[arr_idx]);
 }
 
-__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output,
-                              const float* __restrict__ maxArr,
-                              const int channels, const int row, const int col,
-                              const int type, const long long total_size)
+__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size)
 {
     const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
@@ -2551,5 +2592,124 @@ __global__ void nceDerivKernel(const float* __restrict__ X, const float* __restr
         }
 
         dX[idx] += -d / num_pos;
+    }
+}
+
+// ============= Linear Algebra Functions ============= //
+__global__ void scalar_diagonal_sum(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H)
+{
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const long long total = (long long)B * C;
+    if (idx >= total) return;
+    float val = 0.0f;
+    for(int i = 0; i < H; ++i) val += A[idx * H * H + i * H + i];
+    output[idx] = val;
+}
+
+__global__ void scalar_diagonal_product(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H)
+{
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const long long total = (long long)B * C;
+    if (idx >= total) return;
+    double val = 1.0f;
+    for(int i = 0; i < H; ++i) val *= (double)A[idx * H * H + i * H + i];
+    output[idx] = (float)val;
+}
+
+__global__ void upper_triangular_factorization(float* __restrict__ U, const int batch, const int channels, const int H, const int W)
+{
+    /*
+    @brief: Before function call, L has to be the Identity and U has to have all the data of X
+    */
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    if(idx >= batch * channels) return;
+    const int bc_idx = idx;
+    const int mat_size = H * W;
+    float* U_mat = &U[bc_idx * mat_size];
+    for (int k = 0; k < W; ++k) // O(n^2 per thread)
+    {
+        for (int i = k + 1; i < H; ++i)
+        {
+            if (U_mat[k * W + k] == 0.0f) continue; 
+            float factor = U_mat[i * W + k] / U_mat[k * W + k];
+            for (int j = k; j < W; ++j)
+            {
+                U_mat[i * W + j] -= factor * U_mat[k * W + j];
+            }
+        }
+    }
+
+}
+
+__global__ void lu_factorization(float* __restrict__ L, float* __restrict__ U, const int batch, const int channels, const int H, const int W)
+{
+    /*
+    @brief: Before function call, L has to be the Identity and U has to have all the data of X
+    */
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    if(idx >= batch * channels) return;
+    const int bc_idx = idx;
+    const int mat_size = H * W;
+    float* L_mat = &L[bc_idx * mat_size];
+    float* U_mat = &U[bc_idx * mat_size];
+
+
+    for (int k = 0; k < W; ++k) // O(n^2 per thread)
+    {
+        for (int i = k + 1; i < H; ++i)
+        {
+            if (U_mat[k * W + k] == 0.0f) continue; 
+            float factor = U_mat[i * W + k] / U_mat[k * W + k];
+            L_mat[i * W + k] = factor;
+            for (int j = k; j < W; ++j)
+            {
+                U_mat[i * W + j] -= factor * U_mat[k * W + j];
+            }
+        }
+    }
+
+}
+
+__global__ void solveLX(const float* __restrict__ L, float* __restrict__ X, const int B, const int C, const int H)
+{
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    // L = [H x H] where (H == W) since matrix needs to be N x N for inverse
+    // Also assumes out is properly Zero'd out before computing
+    if(idx >= B * C * H) return;
+    const int bc_idx = idx / H;
+    const int mat_size = H * H;
+    const int h_id = idx % H;
+    const int bc_off = bc_idx * mat_size;
+    const float target = static_cast<float>(h_id == 0);
+    
+    for(int i = 0; i < H; ++i)
+    {
+        float sum = 0.f;
+        if(i == 0)
+        {           
+            X[bc_off + h_id * H + i] = target / L[bc_off + i * H + i];
+            continue;
+        };
+
+        for(int j = 0; j < i; ++j) sum +=  L[bc_off + i * H + j] * X[bc_off + j * H + h_id];
+        X[bc_off + i * H + h_id] = (i == h_id) - sum;
+    }
+
+    return;
+}
+
+__global__ void solveUy(const float* __restrict__ U, const float* __restrict__ Y, float* __restrict__ X, const int B, const int C, const int H)
+{
+    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    if (idx >= (long long)B * C * H) return;
+    const int bc_idx   = idx / H;
+    const int h_id     = idx % H;
+    const int mat_size = H * H;
+    const int bc_off   = bc_idx * mat_size;
+    for (int i = H - 1; i >= 0; --i)
+    {        
+        float sum = 0.f;
+        for (int j = i + 1; j < H; ++j) sum += U[bc_off + i * H + j] * X[bc_off + j * H + h_id];
+        X[bc_off + i * H + h_id] = (Y[bc_off + i * H + h_id] - sum) / U[bc_off + i * H + i];
     }
 }

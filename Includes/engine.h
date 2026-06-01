@@ -112,15 +112,21 @@ public:
     void zero_grad(const graph&X = nullptr, const bool show = false);
     void printParams(const graph&X = nullptr, const bool show = false);
     void printNodes(const graph&X = nullptr, const int show = 0);
-    void clear_graph(const graph&X = nullptr);
-    void clean_clear_graph(const graph&X = nullptr);
+    void clear_graph(const graph&X = nullptr, const bool show = false);
+    void clean_clear_graph(const graph&X = nullptr, const bool show = false);
 
     static graph track(const graph_tree& X);
     static graph identity(const graph& X);
     static graph ones_like(const graph& X);
+    // =============== Matrix Operations ============== //
     static graph identity_like(const graph& X);
-    static graph GaussianNoise_like(const graph& X, const float mean, const float std);
+    static std::pair<graph, graph> LU_factorize(const graph& X);
     static graph like(const graph& X, const str name = "");
+    static graph Inverse(const graph& X);
+    static graph Determinant(const graph& X);
+    static std::tuple<graph, graph, graph> SVD(const graph& X);
+
+    static graph GaussianNoise_like(const graph& X, const float mean, const float std);
     static graph NthRow(const graph& X, const int row);
     static graph Clamp(const graph& X, const float min, const float max);
     static graph Permute(const graph& X, int i0, int i1, int i2, int i3);
@@ -136,6 +142,9 @@ public:
 
     static graph Scale(const graph& input, const float scale, const bool last = false);
     static graph RMSNorm(const graph& input, const int type = 0);
+
+    // Matrix functions
+    static graph ExpM(const graph& X);
 
     static graph Add(const graph& A, const graph& B, const bool last = false);
     static graph Subtract(const graph& A, const graph& B, const bool last = false);
@@ -185,17 +194,20 @@ public:
     static graph InstanceNorm(const graph & X);
 };
 
+inline graph operator +(const graph &A, const graph &B) {return GraphOperations::Add(A,B);}
+inline graph operator -(const graph &A, const graph &B) {return GraphOperations::Subtract(A,B);}
+inline graph operator *(const graph &A, const graph &B) {return GraphOperations::Multiply(A,B);}
+
 class Linear
 { 
 private: 
     int in, out;
     const bool bias;
 public:
-    GraphOperations &go;
     AdamParameter *W1;
     AdamParameter *B1;
     str op_name = "Linear Layer";
-    Linear(GraphOperations &go_ref, const int input, const int output, const str name = "", const bool bias = true);
+    Linear(const int input, const int output, const str name = "", const bool bias = true);
     graph forward(const graph & X);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
@@ -204,12 +216,11 @@ public:
 
 class Convolute2D {
 private:
-    GraphOperations go;
     graph T_node;
     
 public:
     int inp, out, c, d, pad, stride;
-    AdamParameter *weights, *bias;
+    AdamParameter *W1, *B1;
     str name;
     /**
      * @brief For standard convolution call C2D (go, inp, out);
@@ -222,7 +233,7 @@ public:
      * @param padding: padding size (default 1)
      * @param param: Name of the operation (default "" )
      */
-    Convolute2D(GraphOperations&go_ref, int Input, int Output, int C=3, int D=3, int stride = 1, int padding = 1, str param = "");
+    Convolute2D(int Input, int Output, int C=3, int D=3, int stride = 1, int padding = 1, str param = "");
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
     void operator=(const Convolute2D& other);
@@ -231,11 +242,10 @@ public:
 
 class Convolute2DT {
 private:
-    GraphOperations go;
     graph T_node;
     int inp, out, c, d, pad, stride;
 public:
-    AdamParameter *weights, *bias;
+    AdamParameter *W1, *B1;
     str name;
     /**
      * @brief For transposed convolution call C2DT (go, inp, out);
@@ -248,7 +258,7 @@ public:
      * @param padding: padding size (default 1)
      * @param param: Name of the operation (default "" )
      */
-    Convolute2DT(GraphOperations&go_ref, int Input, int Output, int C=2, int D=2, int stride=2, int padding=0, str param="");
+    Convolute2DT(int Input, int Output, int C=2, int D=2, int stride=2, int padding=0, str param="");
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
     graph forward(const graph& X);
@@ -256,11 +266,9 @@ public:
 
 class TimeMLPBlock
 {
-
 public:
-    GraphOperations &go;
     Linear *L0, *L1;
-    TimeMLPBlock(GraphOperations &go_ref, const int t_embed_dim, const int t_hidden);
+    TimeMLPBlock(const int t_embed_dim, const int t_hidden);
     graph forward(const graph & X);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
@@ -271,12 +279,10 @@ class Multi_Linear_Residual_Block
     /*
     @brief: Required Activation and Normalization layer lambdas with reference capture for activation and normalization.. 
     */
-private:
-    GraphOperations& go;
 public:
     const int input_dim, output_dim, residuals, hidden_dim, layers;
     std::vector<Linear*> sequence;
-    Multi_Linear_Residual_Block(GraphOperations& go, const int input, const int output, const int num_residuals, const int layers, const int hidden_size);
+    Multi_Linear_Residual_Block(const int input, const int output, const int num_residuals, const int layers, const int hidden_size);
     template<typename ActFn, typename NormFn>
     graph forward(const graph& X, ActFn activation, NormFn norm)
     {
@@ -287,7 +293,7 @@ public:
             for (int j = 0; j < layers; ++j){
                 int idx = r * layers + j + 1; 
                 if(idx < residuals * layers) A = activation(sequence[idx]->forward(A));
-            } H = norm(go.Add(H,A));
+            } H = norm(H + A);
         }
 
         return sequence[residuals * layers]->forward(H);
@@ -298,11 +304,6 @@ public:
 };
 
 void Noise(const graph & input, const float mean = 0.f, const float std = 1.f);
-
-inline graph operator +(const graph &A, const graph &B) {return GraphOperations::Add(A,B);}
-inline graph operator -(const graph &A, const graph &B) {return GraphOperations::Subtract(A,B);}
-inline graph operator *(const graph &A, const graph &B) {return GraphOperations::Multiply(A,B);}
-
 
 
 

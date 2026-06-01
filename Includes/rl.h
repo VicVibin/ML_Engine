@@ -75,13 +75,13 @@ struct PPOTrainer
         auto [probs, v_pred] = ac.build_train(states); // [B x 4], [B x 1] 
         auto log_probs_new = go.Log(probs);  log_probs_new->op_name = "New Log Probabilities"; // [B x A]
         auto log_pa_new    = go.GatherAction(log_probs_new, actions); log_pa_new->op_name = "New Log Action Probability"; // [B x 1]
-        auto log_ratio = go.Add(log_pa_new, go.Scale(log_prob, -1.0f)); log_ratio->op_name = "Log Ratio"; // [B x 1]
+        auto log_ratio = go.Subtract(log_pa_new, log_prob); log_ratio->op_name = "Log Ratio"; // [B x 1]
         auto ratio     = go.Exp(log_ratio); ratio->op_name = "Ratio"; //[B x 1]
         auto obj1   = go.Multiply(ratio, advantages); obj1->op_name = "Objective 1"; // [B x 1]
         auto obj2   = go.Multiply(go.Clamp(ratio, 1.0f - clip_eps, 1.0f + clip_eps), advantages); obj2->op_name = "Objective 2"; //[B x 1]
         auto L_clip = go.Scale(go.BATCHMEAN(go.Min(obj1, obj2)), -1.0f); L_clip->op_name = "Policy Loss Function"; //[1 x 1]
         auto L_vf   = go.Scale(go.MeanSquaredError(v_pred, returns, false), c1); L_vf->op_name = "Value Function Loss"; //[1x1]
-        auto L_ent  = go.Scale(go.BATCHMEAN(go.Entropy(probs)), c2); L_ent->op_name = "Entropy Loss";
+        auto L_ent  = go.Scale(go.BATCHMEAN(go.Entropy(probs)), -c2); L_ent->op_name = "Entropy Loss";
         auto Last   = go.Add(go.Add(L_clip, L_vf), L_ent, true); Last->op_name = "Final PPO Loss";
         return Last;
     };
@@ -240,5 +240,4 @@ struct DQNTrainer
     };
     
 };
-
 

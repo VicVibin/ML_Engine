@@ -29,7 +29,7 @@ TextualEmbedding::TextualEmbedding(const int embed_dim, const int batch_size, co
         SafeCudaMalloc("Keys", target_keys, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
 
         const int embed_total = MAX_VOCAB_SIZE * embed_dim;
-        GaussianNoise<<<(embed_total+tpb-1)/tpb, tpb>>>(EmbedSpace, embed_total, seed);
+        GaussianNoise<<<(embed_total+tpb-1)/tpb, tpb>>>(EmbedSpace,0.f, 1.f,embed_total, seed);
         
         fillKernel<<<(MAX_BATCH_SIZE*MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(encoder_keys, INT_MIN, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
         fillKernel<<<(MAX_BATCH_SIZE*MAX_CONTEXT_LEN+tpb-1)/tpb, tpb>>>(decoder_keys, INT_MIN, MAX_BATCH_SIZE * MAX_CONTEXT_LEN);
@@ -340,12 +340,13 @@ graph DataLoading::forward(const BatchTexts& dataset, const str type)
     return node;
 }
 
-SingleHeadAttention::SingleHeadAttention(GraphOperations &go_ref, const int embed_dim, const int t_hidden, const int num_heads): go(go_ref), embed_dim(embed_dim), type(type), hidden(t_hidden)
+SingleHeadAttention::SingleHeadAttention(const int embed_dim, const int t_hidden, const int num_heads):
+embed_dim(embed_dim), type(type), hidden(t_hidden)
 {
-    q = new Linear(go, embed_dim, t_hidden, "Transformer Q");
-    k = new Linear(go, embed_dim, t_hidden, "Transformer K");
-    v = new Linear(go, embed_dim, t_hidden, "Transformer V");
-    out = new Linear(go, t_hidden, embed_dim, "Transformer Output");
+    q = new Linear(embed_dim, t_hidden, "Transformer Q");
+    k = new Linear(embed_dim, t_hidden, "Transformer K");
+    v = new Linear(embed_dim, t_hidden, "Transformer V");
+    out = new Linear(t_hidden, embed_dim, "Transformer Output");
 }
 void SingleHeadAttention::save(std::ofstream& f) const
 {
@@ -366,10 +367,10 @@ graph SingleHeadAttention::forward(const graph&X, const bool mask)
     auto Q = q->forward(X);
     auto K = k->forward(X);
     auto V = v->forward(X);
-    auto scores = go.BMMABT(Q, K);
-    auto scaled_scores = go.Scale(scores, 1.0f / sqrtf((float)(hidden)));
-    auto attn_weights = mask ? go.SOFTMASK(scaled_scores,1): go.SOFTMAX(scaled_scores,1);
-    auto attn_output = go.BMM(attn_weights, V);
+    auto scores = GraphOperations::BMMABT(Q, K);
+    auto scaled_scores = GraphOperations::Scale(scores, 1.0f / sqrtf((float)(hidden)));
+    auto attn_weights = mask ? GraphOperations::SOFTMASK(scaled_scores,1): GraphOperations::SOFTMAX(scaled_scores,1);
+    auto attn_output = GraphOperations::BMM(attn_weights, V);
     auto output = out->forward(attn_output);
     output->op_name = type + "Transformer Block Output";
     return output;
@@ -380,10 +381,10 @@ graph SingleHeadAttention::cross_forward(const graph& X, const graph& Y)
     auto Q = q->forward(X);
     auto K = k->forward(Y);
     auto V = v->forward(Y);
-    auto scores = go.BMMABT(Q, K);
-    auto scaled_scores = go.Scale(scores,1.0f/sqrtf((float)(embed_dim)));
-    auto attn_weights =  go.SOFTMASK(scaled_scores,1);
-    auto attn_output = go.BMM(attn_weights, V); 
+    auto scores = GraphOperations::BMMABT(Q, K);
+    auto scaled_scores = GraphOperations::Scale(scores,1.0f/sqrtf((float)(embed_dim)));
+    auto attn_weights =  GraphOperations::SOFTMASK(scaled_scores,1);
+    auto attn_output = GraphOperations::BMM(attn_weights, V); 
     auto output = out->forward(attn_output);
     output->op_name = " Cross SHA Block Output";
     return output;
@@ -398,8 +399,10 @@ graph SingleHeadAttention::cached_forward(const graph& X_new, KVCache&cache, con
     V_new->forward();
 
     int offset = cache.current_len * cache.hidden;
-    cudaMemcpy(cache.K+offset,K_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
-    cudaMemcpy(cache.V+offset,V_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
+    const int tpb = THREADSPERBLOCK;
+    const int bpg = (cache.hidden+tpb-1)/tpb;
+    Write<<<bpg,tpb>>>(K_new->output, cache.K+offset,cache.hidden);
+    Write<<<bpg,tpb>>>(V_new->output, cache.V+offset,cache.hidden);
     cache.current_len += K_new->dim[2];
 
     K_new->clear();
@@ -412,12 +415,12 @@ graph SingleHeadAttention::cached_forward(const graph& X_new, KVCache&cache, con
     V_full->output = cache.V;
 
     // ============================= // 
-    auto pos    = go.MatrixPositionalEncoding(X_new, start_idx);
+    auto pos    = GraphOperations::MatrixPositionalEncoding(X_new, start_idx);
     auto Q_new  = q->forward(pos);
-    auto scores = go.BMMABT(Q_new, K_full);
-    auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)hidden));
-    auto weights = mask ? go.SOFTMASK(scaled, 1) : go.SOFTMAX(scaled, 1);
-    auto attn_out = go.BMM(weights, V_full);
+    auto scores = GraphOperations::BMMABT(Q_new, K_full);
+    auto scaled  = GraphOperations::Scale(scores, 1.0f / sqrtf((float)hidden));
+    auto weights = mask ? GraphOperations::SOFTMASK(scaled, 1) : GraphOperations::SOFTMAX(scaled, 1);
+    auto attn_out = GraphOperations::BMM(weights, V_full);
     auto output = out->forward(attn_out);
     output->op_name = "SHA Cached Forward";
     return output;
@@ -429,37 +432,37 @@ graph SingleHeadAttention::cached_cross_forward(const graph& X_new, KVCache& cac
     graph V_full = std::make_shared<NodeBackProp>("KV_V",1,1,cache.current_len,cache.hidden,0);
     K_full->output = cache.K;
     V_full->output = cache.V;
-    auto scores = go.BMMABT(Q_new, K_full);
-    auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)hidden));
-    auto weights = go.SOFTMASK(scaled, 1);
-    auto attn_out = go.BMM(weights, V_full);
+    auto scores = GraphOperations::BMMABT(Q_new, K_full);
+    auto scaled  = GraphOperations::Scale(scores, 1.0f / sqrtf((float)hidden));
+    auto weights = GraphOperations::SOFTMASK(scaled, 1);
+    auto attn_out = GraphOperations::BMM(weights, V_full);
     auto output = out->forward(attn_out); output->op_name = "SHA output";
     return output;
 }
 
-MultiHeadAttention::MultiHeadAttention(GraphOperations &go_ref, const int embed_dim, const int hidden, const int num_heads, const str& name) : 
-    go(go_ref), hidden(hidden), embed_dim(embed_dim), num_heads(num_heads), name(name)
+MultiHeadAttention::MultiHeadAttention(const int embed_dim, const int hidden, const int num_heads, const str& name) : 
+    hidden(hidden), embed_dim(embed_dim), num_heads(num_heads), name(name)
     {   
         if(hidden % num_heads != 0 )
         {printf("Cannot Split MHA because hidden dim: %i is not divisible by num heads: %i", hidden, num_heads);}
         head_dim = hidden / num_heads;
-        q = new Linear(go, embed_dim, hidden, name + " Query");
-        k = new Linear(go, embed_dim, hidden, name + " Key");
-        v = new Linear(go, embed_dim, hidden, name + " Value");
-        o = new Linear(go, hidden, embed_dim, name + " Output");
+        q = new Linear(embed_dim, hidden, name + " Query");
+        k = new Linear(embed_dim, hidden, name + " Key");
+        v = new Linear(embed_dim, hidden, name + " Value");
+        o = new Linear(hidden, embed_dim, name + " Output");
     } 
 void MultiHeadAttention::save(std::ofstream& f) const{}
 void MultiHeadAttention::load(std::ifstream& f){}
 graph MultiHeadAttention::forward(const graph& X, const bool mask) 
 {
-        auto Q = go.HeadifytoChannel(q->forward(X),num_heads); 
-        auto K = go.HeadifytoChannel(k->forward(X),num_heads);
-        auto V = go.HeadifytoChannel(v->forward(X),num_heads); 
-        auto scores = go.BMMABT(Q, K);
-        auto scaled_scores = go.Scale(scores, 1.0f / sqrtf((float)(head_dim))); 
-        auto attn_weights = mask ? go.SOFTMASK(scaled_scores,1): go.SOFTMAX(scaled_scores,1); 
-        auto attn_output = go.BMM(attn_weights, V);
-        auto attn_concat = go.DeHeadify(attn_output);
+        auto Q = GraphOperations::HeadifytoChannel(q->forward(X),num_heads); 
+        auto K = GraphOperations::HeadifytoChannel(k->forward(X),num_heads);
+        auto V = GraphOperations::HeadifytoChannel(v->forward(X),num_heads); 
+        auto scores = GraphOperations::BMMABT(Q, K);
+        auto scaled_scores = GraphOperations::Scale(scores, 1.0f / sqrtf((float)(head_dim))); 
+        auto attn_weights = mask ? GraphOperations::SOFTMASK(scaled_scores,1): GraphOperations::SOFTMAX(scaled_scores,1); 
+        auto attn_output = GraphOperations::BMM(attn_weights, V);
+        auto attn_concat = GraphOperations::DeHeadify(attn_output);
         auto output = o->forward(attn_concat);  
         output->op_name = "Multi Head Attention Output";
         return output;
@@ -467,30 +470,32 @@ graph MultiHeadAttention::forward(const graph& X, const bool mask)
 } 
 graph MultiHeadAttention::cross_forward(const graph& X, const graph& Y)
 {
-        auto Q = go.HeadifytoChannel(q->forward(X), num_heads);
-        auto K = go.HeadifytoChannel(k->forward(Y), num_heads);
-        auto V = go.HeadifytoChannel(v->forward(Y), num_heads);
-        auto scores = go.BMMABT(Q, K);
-        auto scaled_scores = go.Scale(scores,1.0f/sqrtf((float)(embed_dim)));
-        auto attn_weights =  go.SOFTMASK(scaled_scores,1);
-        auto attn_output = go.BMM(attn_weights, V); 
-        auto attn_concat = go.DeHeadify(attn_output);
+        auto Q = GraphOperations::HeadifytoChannel(q->forward(X), num_heads);
+        auto K = GraphOperations::HeadifytoChannel(k->forward(Y), num_heads);
+        auto V = GraphOperations::HeadifytoChannel(v->forward(Y), num_heads);
+        auto scores = GraphOperations::BMMABT(Q, K);
+        auto scaled_scores = GraphOperations::Scale(scores,1.0f/sqrtf((float)(embed_dim)));
+        auto attn_weights =  GraphOperations::SOFTMASK(scaled_scores,1);
+        auto attn_output = GraphOperations::BMM(attn_weights, V); 
+        auto attn_concat = GraphOperations::DeHeadify(attn_output);
         auto output = o->forward(attn_concat);
         output->op_name = " Cross MHA Block Output";
         return output;
 }
 graph MultiHeadAttention::cached_forward(const graph& X_new, KVCache&cache, const int start_idx, bool mask)
 { 
-    auto K_new = k->forward(X_new);    
-    auto V_new = v->forward(X_new);
+        auto K_new = k->forward(X_new);    
+        auto V_new = v->forward(X_new);
 
         // Handling Cache Update ======== // Can add MemcpyAsync for SpeedUp;
-    K_new->forward();
+        K_new->forward();
         V_new->forward();
 
         int offset = cache.current_len * cache.hidden;
-        cudaMemcpy(cache.K+offset,K_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
-        cudaMemcpy(cache.V+offset,V_new->output,cache.hidden*sizeof(float),cudaMemcpyDeviceToDevice);
+        const int tpb = THREADSPERBLOCK;
+        const int bpg = (cache.hidden+tpb-1)/tpb;
+        Write<<<bpg,tpb>>>(K_new->output, cache.K+offset,cache.hidden);
+        Write<<<bpg,tpb>>>(V_new->output, cache.V+offset,cache.hidden);
         cache.current_len += K_new->dim[2];
 
         K_new->clear();
@@ -502,13 +507,13 @@ graph MultiHeadAttention::cached_forward(const graph& X_new, KVCache&cache, cons
         V_full->output = cache.V;
 
         // ============================= // 
-        auto pos    = go.MatrixPositionalEncoding(X_new, start_idx);
+        auto pos    = GraphOperations::MatrixPositionalEncoding(X_new, start_idx);
         auto Q_new  = q->forward(pos);
-        auto scores = go.BMMABT(go.HeadifytoChannel(Q_new, num_heads), go.HeadifytoChannel(K_full, num_heads));
-        auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)head_dim));
-        auto weights = mask ? go.SOFTMASK(scaled, 1) : go.SOFTMAX(scaled, 1);
-        auto attn_out = go.BMM(weights, go.HeadifytoChannel(V_full, num_heads));
-        auto attn_concat = go.DeHeadify(attn_out);
+        auto scores = GraphOperations::BMMABT(GraphOperations::HeadifytoChannel(Q_new, num_heads), GraphOperations::HeadifytoChannel(K_full, num_heads));
+        auto scaled  = GraphOperations::Scale(scores, 1.0f / sqrtf((float)head_dim));
+        auto weights = mask ? GraphOperations::SOFTMASK(scaled, 1) : GraphOperations::SOFTMAX(scaled, 1);
+        auto attn_out = GraphOperations::BMM(weights, GraphOperations::HeadifytoChannel(V_full, num_heads));
+        auto attn_concat = GraphOperations::DeHeadify(attn_out);
         auto output = o->forward(attn_concat);
         output->op_name = "SHA Cached Forward";
         return output;
@@ -520,22 +525,22 @@ graph MultiHeadAttention::cached_cross_forward(const graph& X_new, KVCache& cach
         graph V_full = std::make_shared<NodeBackProp>("KV_V",1,1,cache.current_len,cache.hidden,0);
         K_full->output = cache.K;
         V_full->output = cache.V;
-        auto scores = go.BMMABT(go.HeadifytoChannel(Q_new, num_heads), go.HeadifytoChannel(K_full, num_heads));
-        auto scaled  = go.Scale(scores, 1.0f / sqrtf((float)head_dim));
-        auto weights = go.SOFTMASK(scaled, 1);
-        auto attn_out = go.BMM(weights, go.HeadifytoChannel(V_full, num_heads));
-        auto attn_concat = go.DeHeadify(attn_out);  
+        auto scores = GraphOperations::BMMABT(GraphOperations::HeadifytoChannel(Q_new, num_heads), GraphOperations::HeadifytoChannel(K_full, num_heads));
+        auto scaled  = GraphOperations::Scale(scores, 1.0f / sqrtf((float)head_dim));
+        auto weights = GraphOperations::SOFTMASK(scaled, 1);
+        auto attn_out = GraphOperations::BMM(weights, GraphOperations::HeadifytoChannel(V_full, num_heads));
+        auto attn_concat = GraphOperations::DeHeadify(attn_out);  
         auto output = o->forward(attn_concat); output->op_name = "SHA output";
         return output;
 }
 
-LLM::LLM(GraphOperations& go_ref, TextualEmbedding& embed, const Text& Database, int batch, int clen, int hidden_dim, int num_heads) :
-    go(go_ref), embedder(embed), embed_dim(embed.embed_dim), Dataload(embed, Database, batch, clen), num_heads(num_heads),
-    T1(go, embed_dim, hidden_dim, num_heads),
-    T2(go, embed_dim, hidden_dim, num_heads),
-    T3(go, embed_dim, hidden_dim, num_heads),
-    fc1(go,embed_dim, embed_dim), 
-    fc2(go,embed_dim, embed_dim), proj(go, embed_dim, embedder.Vocabulary.size(), "Projection")
+LLM::LLM(TextualEmbedding& embed, const Text& Database, int batch, int clen, int hidden_dim, int num_heads) :
+    embedder(embed), embed_dim(embed.embed_dim), Dataload(embed, Database, batch, clen), num_heads(num_heads),
+    T1(embed_dim, hidden_dim, num_heads),
+    T2(embed_dim, hidden_dim, num_heads),
+    T3(embed_dim, hidden_dim, num_heads),
+    fc1(embed_dim, embed_dim), 
+    fc2(embed_dim, embed_dim), proj(embed_dim, embedder.Vocabulary.size(), "Projection")
     {
         if(embedder.Vocabulary.size()  == 0)
         {
@@ -555,20 +560,20 @@ void LLM::build_train(const BatchTexts& data)
         auto decoder_embeds = Dataload.forward(data, "D");
         auto target = Dataload.forward(data, "T");
 
-        auto pos_encodded = go.MatrixPositionalEncoding(encoder_embeds); 
+        auto pos_encodded = GraphOperations::MatrixPositionalEncoding(encoder_embeds); 
         auto Att1 = T1.forward(pos_encodded); 
         auto A1 = fc1.forward(Att1); 
 
-        auto AN1 = go.LayerNorm(go.Add(A1,Att1));
-        auto pos_decoded = go.MatrixPositionalEncoding(decoder_embeds);
+        auto AN1 = GraphOperations::LayerNorm(GraphOperations::Add(A1,Att1));
+        auto pos_decoded = GraphOperations::MatrixPositionalEncoding(decoder_embeds);
         auto Att2 = T2.forward(pos_decoded); 
         auto CrossAtt = T3.cross_forward(Att2, AN1);
 
         auto A2 = fc2.forward(CrossAtt);
-        auto AN2 = go.LayerNorm(go.Add(A2,CrossAtt));
+        auto AN2 = GraphOperations::LayerNorm(A2 + CrossAtt);
 
         auto logits = proj.forward(AN2);
-        auto loss = go.SoftMaxCrossEntropy(logits, target, true);
+        auto loss = GraphOperations::SoftMaxCrossEntropy(logits, target, true);
         go.nodes = topological_sort(loss);
 }
 void LLM::generate(const Text& prompt, const int max_len)
@@ -585,10 +590,10 @@ void LLM::generate(const Text& prompt, const int max_len)
         embedder.forward(decoder_embeds, "D");
 
         // Encoder ================ //
-        auto pos_encodded = go.MatrixPositionalEncoding(encoder_embeds);
+        auto pos_encodded = GraphOperations::MatrixPositionalEncoding(encoder_embeds);
         auto Att1 = T1.forward(pos_encodded);
         auto A1 = fc1.forward(Att1);
-        auto AN1 = go.LayerNorm(go.Add(A1,Att1));
+        auto AN1 = GraphOperations::LayerNorm(GraphOperations::Add(A1,Att1));
         auto K_enc = T3.k->forward(AN1);
         auto V_enc = T3.v->forward(AN1);
         // ======================= //
@@ -602,8 +607,9 @@ void LLM::generate(const Text& prompt, const int max_len)
         KVCache kv_T2(embedder.MAX_CONTEXT_LEN, T2.hidden);
         KVCache kv_T3(embedder.MAX_CONTEXT_LEN, T3.hidden);
         kv_T3.current_len = V_enc->dim[2];
-        cudaMemcpy(kv_T3.K,K_enc->output,K_enc->total*sizeof(float),cudaMemcpyDeviceToDevice);
-        cudaMemcpy(kv_T3.V,V_enc->output,V_enc->total*sizeof(float),cudaMemcpyDeviceToDevice);
+
+        Write<<<(K_enc->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(K_enc->output, kv_T3.K, K_enc->total);
+        Write<<<(V_enc->total+THREADSPERBLOCK-1)/THREADSPERBLOCK,THREADSPERBLOCK>>>(V_enc->output, kv_T3.V, V_enc->total);
         // ==========================//
 
         go.clear_graph();
@@ -618,7 +624,7 @@ void LLM::generate(const Text& prompt, const int max_len)
             auto Att2 = T2.cached_forward(decoder_embeds, kv_T2, start_idx);
             auto CrossAtt = T3.cached_cross_forward(Att2, kv_T3); 
             auto A2 = fc2.forward(CrossAtt);
-            auto AN2 = go.LayerNorm(go.Add(A2, CrossAtt));
+            auto AN2 = GraphOperations::LayerNorm(GraphOperations::Add(A2, CrossAtt));
             auto logits = proj.forward(AN2);
 
             go.nodes = topological_sort(logits);
@@ -648,14 +654,12 @@ void LLM::train(const int num_batches, const int percent, const float min_loss)
         for (int batch_idx = 0; batch_idx < num_batches; ++batch_idx)
         {
             batch_data = Dataload.load_data(); 
-            if (batch_idx == 0) {printf("Memory Requirements: %.3f GB \n", go.GB); go.GB = 0.0f;}  
+            if (batch_idx == 0) {printf("Memory Requirements: %.3f GB \n", GraphOperations::GB); GraphOperations::GB = 0.0f;}  
             go.zero_grad();
             if (batch_idx % percent == 0)
             {   
-                go.calculate_loss = true;
-                go.forward();
+                go.forward(nullptr, true);
                 std::cout << "Batch " << batch_idx+1 << "/" << num_batches << ", Loss: " << go.loss << "\n";
-                go.calculate_loss = false;
 
             }
             else{go.forward();}

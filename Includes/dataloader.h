@@ -23,30 +23,4 @@ using str = std::string;
 using Text = std::vector<str>;
 using BatchText = std::vector<Text>;
 
-Text FolderPaths(const std::string& folder, const int filenums);
-
-struct BatchTexts
-{
-    BatchText encoder;
-    BatchText decoder;
-    BatchText target;
-
-    BatchTexts(int batch_size,int clen):encoder(batch_size,Text(clen+1)),decoder(batch_size,Text(clen+1)),target(batch_size,Text(clen+1)){}
-};
-
-
-class TextProcessor {
-public:
-    str toLower(const str& string);                    // DECLARATION only
-    str removePunctuation(const str& string);          // DECLARATION only
-    bool isAlpha(const str& word);                     // DECLARATION only
-    Text tokenize(const str& line);                    // DECLARATION only
-    Text getFilesInDirectory(const str& folderPath);   // DECLARATION only
-    Text readAllStories(const str& folderPath);        // DECLARATION only
-    Text cleanText(const Text& lines);                 // DECLARATION only
-
-};
-
-Text LoadStory(const str& path);
-void Reading(Text string);
-Text read_words(Text words, const int start, const int end);
+Text FolderPaths(const std::string& folder, const int filenums = -1);

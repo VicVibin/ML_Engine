@@ -1,6 +1,6 @@
 #pragma once
 #include "engine.h"
-#include "dataloader.h"
+#include "text_loader.h"
 
 struct KVCache 
 {
@@ -74,14 +74,12 @@ public:
 
 class SingleHeadAttention
 {
-private:
-    GraphOperations &go;
 public:
     const int embed_dim;
     const int hidden;
     Linear *q, *k, *v, *out;
     const str type;
-    SingleHeadAttention(GraphOperations &go_ref, const int embed_dim, const int t_hidden, const int num_heads = 0);
+    SingleHeadAttention(const int embed_dim, const int t_hidden, const int num_heads = 0);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
     graph forward(const graph&X, const bool mask = false);
@@ -93,8 +91,6 @@ public:
 
 class MultiHeadAttention
 {
-private:
-    GraphOperations &go;
 public:
     const int embed_dim;
     const int hidden;
@@ -103,7 +99,7 @@ public:
     str name;
     Linear *q, *k, *v, *o;
 
-    MultiHeadAttention(GraphOperations &go_ref, const int embed_dim, const int hidden, const int num_heads, const str& name = "MultiHeadAttention"); 
+    MultiHeadAttention(const int embed_dim, const int hidden, const int num_heads, const str& name = "MultiHeadAttention"); 
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
 
@@ -116,6 +112,7 @@ public:
 class LLM
 {
 private:
+    GraphOperations go;
     const int embed_dim;
     TextualEmbedding& embedder;
     DataLoading Dataload;
@@ -125,8 +122,7 @@ private:
     int num_heads;
  
 public:
-    GraphOperations go;
-    LLM(GraphOperations& go_ref, TextualEmbedding& embed, const Text& Database, int batch, int clen, int hidden_dim=128, int num_heads=8);
+    LLM(TextualEmbedding& embed, const Text& Database, int batch, int clen, int hidden_dim=128, int num_heads=8);
     void build_train(const BatchTexts& data);
     void generate(const Text& prompt, const int max_len = 0);
     void train(const int num_batches, const int percent = 1, const float min_loss = 1e-2f);

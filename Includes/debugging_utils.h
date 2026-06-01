@@ -10,7 +10,7 @@ using str = std::string;
 static constexpr float XAVIER  = 6.0f;
 static constexpr bool ADAMW = true;
 static constexpr float NORM = 1.0f;
-static constexpr float LEARNING_RATE = 1e-3f;
+static constexpr float LEARNING_RATE = 1e-4f;
 static constexpr bool SHOULDNORM = false;
 
 template <typename T>
