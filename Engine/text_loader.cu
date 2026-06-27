@@ -1,19 +1,22 @@
 #include "text_loader.h"
 
-Text TextProcessor::readAllStories(const str& folderPath) {
+Text TextProcessor::readAllStories(const str& folderPath) 
+{
     Text allLines;
     Text filenames = FolderPaths(folderPath);
-    if (filenames.empty()) {
-        std::cerr << "No files found in directory: " << folderPath << std::endl;
+    if (filenames.empty()) 
+    {
+        std::cerr << "No files found in directory: " << folderPath << "\n";
         return allLines;
     }
 
-    std::cout << "Found " << filenames.size() << " files in directory" << std::endl;
+    std::cout << "Found " << filenames.size() << " files in directory" << "\n";
 
-    for (const str& filename : filenames) {
-        std::ifstream file(filename);
+    for (const str& filename : filenames) 
+    {
+        std::ifstream file(folderPath + "/" + filename);
         if (!file.is_open()) {
-            std::cerr << "Warning: Could not open file " << filename << std::endl;
+            std::cerr << "Warning: Could not open file " << filename << "\n";
             continue;
         }
 

@@ -86,8 +86,7 @@ __device__ inline void atomicMinFloat(float* __restrict__ addr, float value) {
     int old = *addr_as_int, assumed;
     do {
         assumed = old;
-        old = atomicCAS(addr_as_int, assumed,
-                        __float_as_int(fminf(value, __int_as_float(assumed))));
+        old = atomicCAS(addr_as_int, assumed, __float_as_int(fminf(value, __int_as_float(assumed))));
     } while (assumed != old);
 }
 
@@ -95,12 +94,12 @@ __device__ int ceil_div(const int a, const int b){return (a + b - 1) / b;}
 
 __global__ void nth_row_kernel(const float* __restrict__ X, float* __restrict__ Y, const int which_row, const int b, const int c, const int h, const int w, const bool deriv)
 {
-    const long long idx = threadIdx.x  +  blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x  +  blockDim.x * blockIdx.x;
     if(idx  >= b * c * w) return;
-    const long long b_idx = idx / (c * w);
-    const long long c_idx = (idx / w) % c;
-    const long long w_idx = (idx % w);
-    const long long src = b_idx*c*h*w + c_idx*h*w + which_row * w + w_idx;
+    const unsigned long long b_idx = idx / (c * w);
+    const unsigned long long c_idx = (idx / w) % c;
+    const unsigned long long w_idx = (idx % w);
+    const unsigned long long src = b_idx*c*h*w + c_idx*h*w + which_row * w + w_idx;
     if(deriv) Y[src] += X[idx];
     else Y[idx] = X[src];
 
@@ -108,7 +107,7 @@ __global__ void nth_row_kernel(const float* __restrict__ X, float* __restrict__ 
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, const int d0, const int d1, const int d2, const int d3, const int i0, const int i1, const int i2, const int i3)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= d0*d1*d2*d3) return;
     
     int dims[4] = {d0, d1, d2, d3};
@@ -137,9 +136,9 @@ __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, cons
     Y[out_idx] = X[idx];
 }
 
-__global__ void mulKernel(const float*  X, const float* Y, float* Z, const long long total_size, const bool deriv)
+__global__ void mulKernel(const float*  X, const float* Y, float* Z, const unsigned long long total_size, const bool deriv)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= total_size) return;
     if(deriv) Z[idx] += X[idx]*Y[idx];
     else Z[idx] = X[idx]*Y[idx];
@@ -166,7 +165,7 @@ __global__ void PEncoding(float* __restrict__ X, const int t, const int t_dim, c
 
 __global__ void MatPEncoding(const float* __restrict__ X, float* __restrict__ output, const int batch, const int row, const int col, const int total, const int start_idx)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total) return;
     
     const int pos_idx = (global_idx % (row * col)) / col  + start_idx;
@@ -205,11 +204,10 @@ __global__ void bmm(const float* __restrict__ a, const float* __restrict__ b, fl
     int batch_offset_c = (C == 0)? 0 : batch_idx * m * p;
     
     for (int t = 0; t < (n + BLOCK_SIZE - 1) / BLOCK_SIZE; ++t) {
-        if (row < m && (t * BLOCK_SIZE + threadIdx.x) < n)
+        if (row < m && (t * BLOCK_SIZE + threadIdx.x) < n) 
             s_A[threadIdx.y][threadIdx.x] = a[batch_offset_a + (row * n) + t * BLOCK_SIZE + threadIdx.x];
         else
             s_A[threadIdx.y][threadIdx.x] = 0.0f;
-        
         if (col < p && (t * BLOCK_SIZE + threadIdx.y) < n)
             s_B[threadIdx.y][threadIdx.x] = b[batch_offset_b + (t * BLOCK_SIZE + threadIdx.y) * p + col];
         else
@@ -797,12 +795,11 @@ __global__ void LNorm(float* __restrict__ data, const float* __restrict__ mean, 
                       const int batch,const int channels, const int row,const int col,const float gamma,
                       const float beta,const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size = row*col;
     const int batch_idx   = (global_idx / (channels*out_size));
-    data[global_idx] = gamma*((data[global_idx]-mean[batch_idx]) / 
-    sqrtf((1.0f/(channels*out_size))*std[batch_idx] + epsilon)) + beta;
+    data[global_idx] = gamma*((data[global_idx]-mean[batch_idx])*rsqrtf((1.0f/(channels*out_size))*std[batch_idx] + epsilon)) + beta;
 
 }
 
@@ -810,12 +807,11 @@ __global__ void BNorm(float* __restrict__ data, const float* __restrict__ mean, 
                       const int batch, const int channels, const int row, const int col, const float gamma,
                       const float beta, const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size  = row*col;
     const int channel_idx = (global_idx / out_size) % channels;
-    data[global_idx] = gamma*((data[global_idx]-mean[channel_idx]) / 
-    sqrtf((1.0f/(batch*out_size))*std[channel_idx] + epsilon))+beta;
+    data[global_idx] = gamma*((data[global_idx]-mean[channel_idx])*rsqrtf((1.0f/(batch*out_size))*std[channel_idx] + epsilon))+beta;
     
 }
 
@@ -823,8 +819,8 @@ __global__ void GNorm(float* __restrict__ data, const float* __restrict__ mean, 
                       const int batch, const int channels, const int groups, const int row, const int col,
                       const float gamma, const float beta, const float epsilon)  //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
-    const long long global_idx = threadIdx.x + (long long)blockDim.x * blockIdx.x;
-    if (global_idx >= (long long)batch * channels * row * col) return;
+    const unsigned long long global_idx = threadIdx.x + (unsigned long long)blockDim.x * blockIdx.x;
+    if (global_idx >= (unsigned long long)batch * channels * row * col) return;
 
     const int out_size    = row * col;
     const int depth       = channels / groups;
@@ -832,25 +828,21 @@ __global__ void GNorm(float* __restrict__ data, const float* __restrict__ mean, 
     const int channel_idx = (int)(global_idx / out_size) % channels;
     const int group_idx   = channel_idx / depth;
     const int g           = batch_idx * groups + group_idx;
-
     const float inv_N = 1.0f / (float)(depth * out_size);
     const float mu    = (float)mean[g];
-    const float sigma = sqrtf((float)var[g] * inv_N + epsilon); 
-
-    data[global_idx] = gamma * (data[global_idx] - mu) / sigma + beta;
+    data[global_idx] = gamma * (data[global_idx] - mu)*rsqrt((float)var[g] * inv_N + epsilon) + beta;
 }
 
 __global__ void INorm(float* __restrict__ data, const float* __restrict__ mean, const float* __restrict__  std,
                       const int batch, const int channels, const int row, const int col, const float gamma, 
                       const float beta, const float epsilon) //γ*((x-μ)/sqrtf(σ^2+ε))+β;
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size = row*col;
     const int batch_idx   = (global_idx / (channels*out_size));
     const int channel_idx = (global_idx / out_size) % channels;
-    data[global_idx] = gamma*((data[global_idx] - mean[batch_idx*channels+channel_idx]) 
-                       / sqrtf((1.0f/out_size)*std[batch_idx*channels+channel_idx] + epsilon)) + beta;
+    data[global_idx] = gamma*((data[global_idx] - mean[batch_idx*channels+channel_idx])* rsqrtf((1.0f/out_size)*std[batch_idx*channels+channel_idx] + epsilon)) + beta;
 }
 
 
@@ -858,13 +850,13 @@ __global__ void LayerBackward(float* __restrict__ igrad, const float* __restrict
                               const float* __restrict__ ggamma, const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*row*col) return;
     const int out_size = row*col;
     const int batch_idx = (global_idx / out_size);
     const int N = channels * out_size; 
     
-    const float std_inv = 1.0f / sqrtf(variance[batch_idx] / N + epsilon);
+    const float std_inv = rsqrtf(variance[batch_idx] / N + epsilon);
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx]-(ggamma[batch_idx]/N) - node[global_idx] * (ggammanode[batch_idx] / N));
 
 }
@@ -873,12 +865,12 @@ __global__ void BatchBackward(float* __restrict__ igrad, const float* __restrict
                               const float* __restrict__ ggamma, const float* __restrict__ ggammanode, const float* __restrict__ variance, 
                               const float gamma, const float epsilon, const int batch, const int channels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size  = row*col;
     const int channel_idx = (global_idx / out_size) % channels;
     const int N = batch * out_size; 
-    const float std_inv = 1.0f/sqrtf(variance[channel_idx]/ N + epsilon);
+    const float std_inv = rsqrtf(variance[channel_idx]/ N + epsilon);
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx] - (ggamma[channel_idx] / N) - node[global_idx] * (ggammanode[channel_idx] / N));
 }
 
@@ -886,7 +878,7 @@ __global__ void GroupBackward(float*__restrict__ igrad, const float* __restrict_
                               const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int groups, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= batch*channels*row*col) return;
     const int out_size = row*col;
     const int batch_idx   = (global_idx / (channels*out_size));
@@ -895,7 +887,7 @@ __global__ void GroupBackward(float*__restrict__ igrad, const float* __restrict_
     const int depth = channels / groups;
     const int N = depth * out_size;  
     const int variance_idx = batch_idx * groups + group_idx;
-    const float std_inv = 1.0f / sqrtf(variance[variance_idx] / N + epsilon);
+    const float std_inv = rsqrtf(variance[variance_idx] / N + epsilon);
     
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx] - (ggamma[variance_idx] / N)
                          - node[global_idx] * (ggammanode[variance_idx] / N));
@@ -907,14 +899,14 @@ __global__ void InstanceBackward(float* __restrict__ igrad, const float* __restr
                               const float* __restrict__ variance, const float gamma, const float epsilon, const int batch, 
                               const int channels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size = row*col;
     const int batch_idx   = (global_idx / (channels*out_size));
     const int channel_idx = (global_idx / out_size) % channels;
     const int N = out_size; 
     const int variance_idx = batch_idx * channels + channel_idx;
-    const float std_inv = 1.0f / sqrtf(variance[variance_idx] / N + epsilon);
+    const float std_inv = rsqrtf(variance[variance_idx] / N + epsilon); // 1/sqrt
     
     igrad[global_idx] += std_inv * (gamma * ngrad[global_idx] - (ggamma[variance_idx] / N)
                          - node[global_idx] * (ggammanode[variance_idx] / N));
@@ -924,7 +916,7 @@ __global__ void InstanceBackward(float* __restrict__ igrad, const float* __restr
 
 __global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*row*col) return;
     const int out_size = row*col;
     const int N = channels * out_size; 
@@ -934,7 +926,7 @@ __global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict
 
 __global__ void BatchMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int batch, const int channels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >=batch*channels*row*col) return;
     const int out_size = row*col;
     const int N = batch * out_size; 
@@ -942,9 +934,9 @@ __global__ void BatchMeanGrad(const float* __restrict__ ngrad, float* __restrict
     igrad[global_idx] += ngrad[channel_idx] / N;
 }
 
-__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv)
+__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const unsigned long long size, const float p, const uint64_t seed, const int deriv)
 {
-    const long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= size) return;
     if(deriv == 0)
     {
@@ -955,23 +947,23 @@ __global__ void dropoutKernel(const float* __restrict__ data, float* __restrict_
         output[idx] = data[idx] * mask[idx] * (1.0f / (1.0f - p));
     }
 
-    else {output[idx] += data[idx] * mask[idx] * (1.0f / (1.0f - p));}
+    else  output[idx] += data[idx] * mask[idx] * (1.0f / (1.0f - p));
 }
 
-__global__ void Standard_Weights(float* __restrict__ w, const long long size, const float scale, const uint64_t seed){
-    const long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void Standard_Weights(float* __restrict__ w, const unsigned long long size, const float scale, const uint64_t seed){
+    const unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= size) return;
     curandStatePhilox4_32_10_t state;
     curand_init(seed, idx, 0, &state);
     float val = curand_uniform(&state);
-    w[idx] = (val * 2.0f - 1.0f) * scale;
+    w[idx] = (val * 2.0f - 1.0f) * scale; // unif(-1/scale , 1/scale);
 }
 
 __global__ void PadOutput(const float* __restrict__ input, float* __restrict__ output, const int batch, const int channels, 
                           const int inH, const int inW, const int outH, const int outW, const int padTop, const int padLeft)
 {
-    const long long idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const long long total = (long long)batch * (long long)channels *(long long)outH * (long long)outW;
+    const unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned long long total = (unsigned long long)batch * (unsigned long long)channels *(unsigned long long)outH * (unsigned long long)outW;
     if(idx >= total) return;
 
     const int w = idx % outW;
@@ -1016,13 +1008,13 @@ __global__ void CV2D(const float* __restrict__ X, const float* __restrict__ K, c
         int in_x = out_x * stride - pad + kw;
         
         if (in_y >= 0 && in_y < H && in_x >= 0 && in_x < W) {
-            long long x_id = ((long long)n * Cin + cin) * (H * W) + in_y * W + in_x;
-            long long k_id = ((long long)cout * Cin + cin) * (KH * KW) + kh * KW + kw;
+            long long x_id = ((unsigned long long)n * Cin + cin) * (H * W) + in_y * W + in_x;
+            long long k_id = ((unsigned long long)cout * Cin + cin) * (KH * KW) + kh * KW + kw;
             sum += X[x_id] * K[k_id];
         }
     }
 
-    long long y_id = ((long long)n * Cout + cout) * (OH * OW) + out_y * OW + out_x;
+    long long y_id = ((unsigned long long)n * Cout + cout) * (OH * OW) + out_y * OW + out_x;
     Y[y_id] = (bias != nullptr) ? sum + bias[cout] : sum;
 }
 
@@ -1049,12 +1041,12 @@ __global__ void GV2D(const float* __restrict__ X, const float* __restrict__ dZ, 
         int in_x = ox * stride - pad + kw;
         if (in_y < 0 || in_y >= a || in_x < 0 || in_x >= b) continue;
 
-        long long x_id = ((long long)n * in + cin) * (a * b) + in_y * b + in_x;
-        long long g_id = ((long long)n * out + cout) * (OH * OW) + oy * OW + ox;
+        long long x_id = ((unsigned long long)n * in + cin) * (a * b) + in_y * b + in_x;
+        long long g_id = ((unsigned long long)n * out + cout) * (OH * OW) + oy * OW + ox;
         sum += X[x_id] * dZ[g_id];
     }
 
-    long long k_id = ((long long)cout * in + cin) * (c * d)+ kh * d + kw;
+    long long k_id = ((unsigned long long)cout * in + cin) * (c * d)+ kh * d + kw;
     dK[k_id] = sum;
 }
 
@@ -1221,7 +1213,7 @@ __global__ void CVT2D_GradInput(const float* __restrict__ grad_output, const flo
 
 __global__ void ReLU(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float val  = input[global_idx];
     if(val < 0){output[global_idx] = 0.0f;}
@@ -1230,7 +1222,7 @@ __global__ void ReLU(const float* __restrict__ input, float* __restrict__ output
 
 __global__ void deriv_ReLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= total_size) return;
     float mask = (input[idx] > 0.0f) ? 1.0f : 0.0f;
     grad_out[idx] += grad_in[idx] * mask;
@@ -1238,7 +1230,7 @@ __global__ void deriv_ReLU(const float* __restrict__ input, const float* __restr
 
 __global__ void LeakyReLU(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float val  = input[global_idx];
     if(val < 0){output[global_idx] = 0.01f* input[global_idx];}
@@ -1247,7 +1239,7 @@ __global__ void LeakyReLU(const float* __restrict__ input, float* __restrict__ o
 
 __global__ void deriv_LeakyReLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= total_size) return;
     float mask = (input[idx] < 0.0f) ? 0.01f : 1.0f;
     grad_out[idx] += grad_in[idx] * mask;
@@ -1255,7 +1247,7 @@ __global__ void deriv_LeakyReLU(const float* __restrict__ input, const float* __
 
 __global__ void SiLU(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float val  = input[global_idx];
     output[global_idx] = val *(1.0f / (1.0f + expf(-val)));
@@ -1263,7 +1255,7 @@ __global__ void SiLU(const float* __restrict__ input, float* __restrict__ output
 
 __global__ void deriv_SiLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float val = input[global_idx];
     const float exp = expf(val);
@@ -1275,14 +1267,14 @@ __global__ void deriv_SiLU(const float* __restrict__ input, const float* __restr
 
 __global__ void TaNH(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     output[global_idx] = tanhf(input[global_idx]);
 }
 
 __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float exp2 = expf(2.0f * input[global_idx]);
     const float negexp2 = 1.0f / exp2;
@@ -1293,7 +1285,7 @@ __global__ void deriv_TaNH(const float* __restrict__ input, const float* __restr
 
 __global__ void GeLU(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float x = input[global_idx];
     const float val = sqrtf(2.0f / PI) * (x + 0.044715f * x * x * x);
@@ -1304,7 +1296,7 @@ __global__ void GeLU(const float* __restrict__ input, float* __restrict__ output
 
 __global__ void deriv_GeLU(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float x = input[global_idx];
     const float root = sqrtf(2.0f / PI);
@@ -1316,7 +1308,7 @@ __global__ void deriv_GeLU(const float* __restrict__ input, const float* __restr
 
 __global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ output, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float negexp = expf( -1.0f * input[global_idx]);
     output[global_idx] = 1.0f / (1.0f + negexp);
@@ -1325,7 +1317,7 @@ __global__ void Sigmoid(const float* __restrict__ input, float* __restrict__ out
 
 __global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __restrict__ grad_in, float* __restrict__ grad_out, const int total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (global_idx >= total_size) return;
     const float exp = expf(input[global_idx]);
     const float negexp = 1.0f / exp;
@@ -1338,7 +1330,7 @@ __global__ void deriv_Sigmoid(const float* __restrict__ input, const float* __re
 __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, const int batch_size,
                           const int depth, const int a, const int b, const int c, const int d) // (a,b) -> (c,d)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
 
     if(global_idx >= batch_size * depth * c * d){return;}
 
@@ -1358,7 +1350,7 @@ __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, co
 __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, const int batch_size,const int depth, 
                             const int a, const int b, const int c, const int d) // (c,d)->(a,b)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
 
     if(global_idx >= batch_size * depth * a * b){return;}
 
@@ -1376,60 +1368,46 @@ __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, 
     Y[global_idx] += X[xOffset];}
 }
 
-__global__ void HeadifyColChannel(const float* __restrict__ input, float* __restrict__ output, const int batch, const int req_channels, const int row, const int col, int flag)
+__global__ void HeadifyColChannel(const float* __restrict__ input, float* __restrict__ output, const int batch, const int heads, const int seq, const int head_dim, const int flag)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
-    if(global_idx >= batch * req_channels * row * col) return;
-    if(flag == 0)
+    const int total = batch * heads * seq * head_dim;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (idx >= total) return;
+
+    const int d = idx % head_dim;
+    const int s = (idx / head_dim) % seq;
+    const int h = (idx / (head_dim * seq)) % heads;
+    const int b = idx / (head_dim * seq * heads);
+    const int embed = heads * head_dim;
+    const int headified_idx = b * (heads * seq * head_dim) + h * (seq * head_dim) + s * head_dim + d;
+    const int flat_idx      = b * (seq * embed)            + s * embed             + h * head_dim + d;
+
+    if (flag == 0) 
     {
-        const int batch_idx = global_idx / (req_channels*row *col);
-        const int channel_idx = (global_idx / (row * col)) % req_channels;
-        const int outRow = (global_idx % (row * col)) / col;
-        const int outCol = (global_idx % (row * col)) % col;
-        const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
-        output[global_idx] = input[input_idx];
+        output[headified_idx] = input[flat_idx];
         return;
     }
-    if(flag  == 1)
+
+    if (flag == 1)  
     {
-        const int batch_idx = global_idx / (req_channels*row *col);
-        const int channel_idx = (global_idx / (row * col)) % req_channels;
-        const int outRow = (global_idx % (row * col)) / col;
-        const int outCol = (global_idx % (row * col)) % col;
-        const int input_idx = batch_idx * row * req_channels * col + outRow * req_channels * col + channel_idx  * col + outCol;
-        output[input_idx] += input[global_idx];
+        atomicAdd(&output[flat_idx], input[headified_idx]);
         return;
     }
-    if (flag == 2)
+    if (flag == 2) 
     {
-        const int full_col = col * req_channels; 
-        const int batch_idx   = global_idx / (row * full_col);
-        const int outRow      = (global_idx / full_col) % row;
-        const int c_out       = global_idx % full_col;
-        const int col_idx     = c_out / req_channels;
-        const int channel_idx = c_out % req_channels;
-        const int input_idx = batch_idx * req_channels * row * col + channel_idx * row * col + outRow * col + col_idx;
-        output[global_idx] = input[input_idx];
+        output[flat_idx] = input[headified_idx];
         return;
     }
-    
-    if(flag == 3)
+    if (flag == 3)
     {
-        const int full_col = col * req_channels; 
-        const int batch_idx   = global_idx / (row * full_col);
-        const int outRow      = (global_idx / full_col) % row;
-        const int c_out       = global_idx % full_col;
-        const int col_idx     = c_out / req_channels;
-        const int channel_idx = c_out % req_channels;
-        const int input_idx = batch_idx * req_channels * row * col + channel_idx * row * col + outRow * col + col_idx;
-        output[input_idx] += input[global_idx];
+        atomicAdd(&output[headified_idx], input[flat_idx]);
         return;
     }
 }
 
 __global__ void Channel_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
 {
-    const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const int outsize = row*col;
     if(global_idx >= batch * (c1+c2)* outsize) return;
     const int batch_idx = global_idx / ((c1+c2)*outsize);
@@ -1442,7 +1420,7 @@ __global__ void Channel_Concat(const float* __restrict__ A, const float* __restr
 
 __global__ void Channel_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int c1, const int c2, const int row, const int col)
 {
-    const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
     const int outsize = row*col;
     if(global_idx >= batch * (c1+c2)* outsize) return;
     const int batch_idx = global_idx / ((c1+c2)*outsize);
@@ -1455,8 +1433,8 @@ __global__ void Channel_Split(float* __restrict__ A, float* __restrict__ B, cons
 
 __global__ void Column_Concat(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
 {   
-    const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
-    const long long A_size = batch * channel * row * c1;
+    const unsigned long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long A_size = batch * channel * row * c1;
     if(global_idx >= batch * channel * row * (c1+c2)) return;
     if(global_idx < A_size) C[global_idx] = A[global_idx];
     else C[global_idx] = B[global_idx - A_size];
@@ -1464,8 +1442,8 @@ __global__ void Column_Concat(const float* __restrict__ A, const float* __restri
 
 __global__ void Column_Split(float* __restrict__ A, float* __restrict__ B, const float* __restrict__ C, const int batch, const int channel, const int row, const int c1, const int c2)
 {   
-    const long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
-    const long long A_size = batch * channel * row * c1;
+    const unsigned long long global_idx =  threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long A_size = batch * channel * row * c1;
     if(global_idx >= batch * channel * row * (c1+c2)) return;
     if(global_idx < A_size) A[global_idx] += C[global_idx];
     else B[global_idx - A_size] += C[global_idx];
@@ -1474,8 +1452,8 @@ __global__ void Column_Split(float* __restrict__ A, float* __restrict__ B, const
 __global__ void Vector_Concat(const float* __restrict__ A, float* __restrict__ B, const int batch, const int channel,
                              const int row, const int a_col, const int total_col, const int col_offset) 
 {
-    const long long idx = threadIdx.x + (long long)blockDim.x * blockIdx.x;
-    const long long A_size = (long long)batch * channel * row * a_col;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockDim.x * blockIdx.x;
+    const unsigned long long A_size = (unsigned long long)batch * channel * row * a_col;
     if (idx >= A_size) return;
     
     const int col_a = idx % a_col;
@@ -1485,33 +1463,33 @@ __global__ void Vector_Concat(const float* __restrict__ A, float* __restrict__ B
     const int ch    = rem2 % channel;
     const int b     = rem2 / channel;
 
-    const long long B_idx = (long long)b  * (channel * row * total_col) + (long long)ch * (row * total_col) +
-                            (long long)r  * total_col +(col_a + col_offset);
+    const unsigned long long B_idx = (unsigned long long)b  * (channel * row * total_col) + (unsigned long long)ch * (row * total_col) +
+                            (unsigned long long)r  * total_col +(col_a + col_offset);
     B[B_idx] = A[idx];
 }
 
 __global__ void Vector_Split(const float* __restrict__ dB, float* __restrict__ dA, const int batch, const int channel,
                        const int row, const int a_col, const int total_col, const int col_offset)
 {
-    const long long idx    = threadIdx.x + (long long)blockDim.x * blockIdx.x;
-    const long long dA_size = (long long)batch * channel * row * a_col;
+    const unsigned long long idx    = threadIdx.x + (unsigned long long)blockDim.x * blockIdx.x;
+    const unsigned long long dA_size = (unsigned long long)batch * channel * row * a_col;
     if (idx >= dA_size) return;
 
     const int col_a = idx % a_col, rem1  = idx / a_col, r = rem1 % row;
     const int rem2  = rem1 / row, ch = rem2 % channel, b = rem2 / channel;
-    const long long dB_idx =(long long)b  * (channel * row * total_col) + (long long)ch * (row * total_col)+
-    (long long)r  * total_col +(col_a + col_offset);
+    const unsigned long long dB_idx =(unsigned long long)b  * (channel * row * total_col) + (unsigned long long)ch * (row * total_col)+
+    (unsigned long long)r  * total_col +(col_a + col_offset);
 
     dA[idx] += dB[dB_idx];
 }
 
-__global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const long long total_size)
+__global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const unsigned long long total_size)
 {
     if (threadIdx.x + blockDim.x * blockIdx.x >= total_size) return;
 
     const int tpb = blockDim.x;
-    const long long block_start = (long long)blockIdx.x * tpb;
-    const long long block_end   = min(block_start + tpb, total_size);
+    const unsigned long long block_start = (unsigned long long)blockIdx.x * tpb;
+    const unsigned long long block_end   = min(block_start + tpb, total_size);
 
     double block_sum = 0.0;
     if (threadIdx.x == 0) 
@@ -1530,7 +1508,7 @@ __global__ void SumSquared(double* __restrict__ scale, const float* __restrict__
 __global__ void AdamUpdate(float* __restrict__ output, const float* __restrict__ grad, const int total_size, const int t, float* __restrict__ m, float* __restrict__ v,
                            const float b1, const float b2, const float epsilon, const float lr){
 
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float g = grad[global_idx];
     m[global_idx] = b1 * m[global_idx] + (1.0 - b1) * g;
@@ -1544,7 +1522,7 @@ __global__ void AdamUpdate(float* __restrict__ output, const float* __restrict__
 __global__ void AdamWUpdate(float* __restrict__ output, const float* __restrict__ grad, const int total_size, const int t, float* __restrict__ m, float* __restrict__ v,
                            const float b1, const float b2, const float epsilon, const float lambda, const float lr){
 
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     const float g = grad[global_idx];
     m[global_idx] = b1 * m[global_idx] + (1.0 - b1) * g;
@@ -1556,29 +1534,28 @@ __global__ void AdamWUpdate(float* __restrict__ output, const float* __restrict_
 }
 
 __global__ void KeyUpdate(float* __restrict__ EmbedSpace, const float* __restrict__ grad, const int* __restrict__ keys, const int clen, const int max_clen, 
-                          const int embed_dim, const float lr, const long long total)
+                          const int embed_dim, const float lr, const unsigned long long total)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total) return;
     
-    const int batch_idx = global_idx / (clen * embed_dim);
-    const int key_row = global_idx % (clen * embed_dim);
-    const int token_idx = key_row / embed_dim;
-    const int dim_idx = key_row  % embed_dim;
+    const unsigned int batch_idx = global_idx / (clen * embed_dim);
+    const unsigned int key_row = global_idx % (clen * embed_dim);
+    const unsigned int token_idx = key_row / embed_dim;
+    const unsigned int dim_idx = key_row  % embed_dim;
     const int key = keys[batch_idx * max_clen + token_idx];
     if(key == INT_MIN || key < 0) return;
     EmbedSpace[key * embed_dim + dim_idx] += -lr * grad[global_idx];
 }
 
-__global__ void OneHotEmbeddings(float* __restrict__ output,const int* __restrict__ keys,int clen,int max_clen,int vocab_size,long long total_size)
+__global__ void OneHotEmbeddings(float* __restrict__ output,const int* __restrict__ keys,int clen,int max_clen,int vocab_size, const unsigned long long total_size)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
-    const int key_row = global_idx / clen;
-    const int key_col = global_idx % clen;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned int key_row = global_idx / clen;
+    const unsigned int key_col = global_idx % clen;
     if(global_idx >= total_size) return;
     const int key = keys[key_row * max_clen + key_col];
     if(key == INT_MIN || key < 0 || key >= vocab_size) return;
-    //printf("OneHotEmbeddings: Setting output[%lld] to 1 for key %d\n", global_idx * vocab_size + key, key);
     output[global_idx * vocab_size + key] = 1.0f;
 }
 
@@ -1608,7 +1585,7 @@ __global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, in
 
 __global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int batch, int channels, int rows, int columns)
 {
-    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= batch * channels * rows) return;
     const int base_offset = idx * columns;
     for(int i = 0; i < columns; ++i){X[base_offset + i] += Y[i];}
@@ -1617,7 +1594,7 @@ __global__ void BCumAdd(float* __restrict__ X, const float* __restrict__ Y, int 
 __global__ void broadcast_add_general(const float* __restrict__ X, const float* __restrict__ bias, float* __restrict__ output, 
                                       const int batch_size, const int channels, const int a, const int b, const int c, const int d)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
     const int output_size = a * b;
     if(global_idx >= batch_size * channels * output_size) return;
     
@@ -1638,7 +1615,7 @@ __global__ void broadcast_add_general(const float* __restrict__ X, const float* 
 __global__ void broadcast_add_backward(const float* __restrict__ grad_out, float* __restrict__ grad_B, const int batch_size, 
                                        const int channels, const int a, const int b, const int c, const int d)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     const int B_size = c * d;
     if(global_idx >= batch_size * channels * B_size) return;
     
@@ -1668,8 +1645,8 @@ __global__ void broadcast_add_backward(const float* __restrict__ grad_out, float
 __global__ void transpose(const float* __restrict__ X, float* __restrict__ output, const int batch_size, const int channels, 
                           const int row, const int col, const int indicator)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
-    const long long input_size = row * col;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
+    const unsigned long long input_size = row * col;
     const int total_size = batch_size * channels * input_size;
     if (global_idx >= total_size) return;
     const int bc_idx = global_idx / input_size;
@@ -1683,47 +1660,64 @@ __global__ void transpose(const float* __restrict__ X, float* __restrict__ outpu
 
 __global__ void broadcast_add(const float* __restrict__ X, const float* __restrict__ bias, float* __restrict__ output, const int batch_size, const int kernels, const int row, const int col)
 {
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x; 
     const int output_size = row * col;
     if(global_idx >= batch_size * kernels * output_size){return;}
     const int matrix =  (global_idx / output_size) % kernels;
     output[global_idx] = X[global_idx] + bias[matrix];
 }
 
-
-__global__ void Write(const float* __restrict__ X, float* __restrict__ Y, const long long total)
+__global__ void Write(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total)
 {
-    const long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
     if(idx >= total) return;
     Y[idx] = X[idx];
 }
 
-__global__ void Scale_Write(const float* __restrict__ X, float* __restrict__ Y, const long long total, const float scale)
+__global__ void Scale_Write(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total, const float scale)
 {
-    const long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
     if(idx >= total) return;
     Y[idx] = scale * X[idx];
 }
 
-__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const double scale)
+__global__ void AccumulateBC(const float* __restrict__ X, const float* __restrict__ scale, float* __restrict__ Y, const int B, const int C, const int H, const int W)
 {
-    const int row_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long total = (unsigned long long) B * C * H * H;
+    if (idx >= total){return;}
+    const int bc_idx = idx / (H*W);
+    Y[idx] +=  scale[bc_idx] *X[idx];
+}
+
+__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total_size, const double scale)
+{
+    const unsigned long long row_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (row_idx >= total_size){return;}
     Y[row_idx] += scale*X[row_idx];
 
 }
 
-__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const float* scale)
+__global__ void SelfAdd(float* __restrict__ X, const unsigned long long total_size, const double scale)
 {
-    const int row_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long row_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    if (row_idx >= total_size){return;}
+    X[row_idx] += scale*X[row_idx];
+
+}
+
+
+__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total_size, const float* scale)
+{
+    const unsigned long long row_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (row_idx >= total_size){return;}
     Y[row_idx] += (*scale)*X[row_idx];
 
 }
 
-__global__ void ScaleAdd(const float* __restrict__ X, const float* __restrict__ Y, float* __restrict__ Z, const float scale, const long long total_size)
+__global__ void ScaleAdd(const float* __restrict__ X, const float* __restrict__ Y, float* __restrict__ Z, const float scale, const unsigned long long total_size)
 {
-    const int row_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long row_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (row_idx >= total_size){return;}
     Z[row_idx] = X[row_idx] + scale * Y[row_idx];
     
@@ -1731,7 +1725,7 @@ __global__ void ScaleAdd(const float* __restrict__ X, const float* __restrict__ 
 
 __global__ void Update(float* __restrict__ output, const float* __restrict__ grad, const int total_size, const double* __restrict__ scale, const float lr)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (global_idx >= total_size) return;
     const float g = lr * grad[global_idx] / (float)(*scale);
     output[global_idx] -= g;
@@ -1778,10 +1772,9 @@ __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int
     else{printf("COMPUTATIONAL ERROR: Input to SQRTSCALE is nan");return;}
 }
 
-
-__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
+__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar =   target[global_idx];
     const float x_val = X[global_idx];
@@ -1791,9 +1784,9 @@ __global__ void mse_kernel(const float* __restrict__ X, const float* __restrict_
 
 }
 
-__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
+__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
@@ -1802,9 +1795,9 @@ __global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict_
     if(deriv && last)  output[global_idx] -= tar * grad[global_idx] / (x_val + 1e-27f);
 }
 
-__global__ void e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv) 
+__global__ void e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float x_val = X[global_idx];
     if(!deriv) output[global_idx] = -x_val * logf(x_val + 1e-27f);
@@ -1812,78 +1805,74 @@ __global__ void e_kernel(const float* __restrict__ X, const float* __restrict__ 
     if(deriv &&  last) output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f) * grad[global_idx];
 }
 
-
-__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total)
+__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const unsigned long long total)
 {
     __shared__ double smem[THREADSPERBLOCK];
-    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long gid = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     double val = 0.0;
     if (gid < total) { double d = (double)target[gid] - (double)X[gid]; val = d * d; }
     val = block_reduce_sum(val, smem);
     if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)total));
 }
 
-__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total)
+__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const unsigned long long total)
 {
     __shared__ double smem[THREADSPERBLOCK];
-    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long gid = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     double val = 0.0;
     if (gid < total) val = -(double)target[gid] * log((double)X[gid] + 1e-27);
     val = block_reduce_sum(val, smem);
     if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)total));
 }
 
-__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int batch, const long long total)
+__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int batch, const unsigned long long total)
 {
     __shared__ double smem[THREADSPERBLOCK];
-    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long gid = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     double val = 0.0;
     if (gid < total) { double x = (double)X[gid]; val = -x * log(x + 1e-27f); }
     val = block_reduce_sum(val, smem);
     if (threadIdx.x == 0) atomicAdd(output, (float)(val / (double)batch));
 }
 
-
-__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total,const bool last, const bool full) 
+__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total,const bool last, const bool full) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    const long long idx = full ? global_idx : 0;
+    const unsigned long long idx = full ? global_idx : 0;
     if(last) output[global_idx] += 2.0f * (x_val - tar) / (float)total;
     else {output[global_idx] += (2.0f * (x_val - tar) * grad[idx]) / (float)total;} // Grad is a single scalar
 
 }
 
-__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool full) 
+__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool full) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const float tar = target[global_idx];
     const float x_val = X[global_idx];
-    const long long idx = full ? global_idx : 0;
+    const unsigned long long idx = full ? global_idx : 0;
     if(last) output[global_idx] -=  (tar / (x_val + 1e-27f)) / (float)total;
     else output[global_idx] -=  (tar*grad[idx] / (x_val + 1e-27f)) / (float)total;
 
 }
 
-__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int batch, const long long total, const bool last, const bool full) 
+__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int batch, const unsigned long long total, const bool last, const bool full) 
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total) return;
     const float x_val = X[global_idx];
-    const long long idx = full ? global_idx : 0;
+    const unsigned long long idx = full ? global_idx : 0;
     if(last) output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f) / (float)batch;
     else output[global_idx] -= (logf(x_val + 1e-27f) + 1.0f)*grad[idx] / (float)batch;
 }
 
-
-
 __global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int batch, const int col)
 {
     __shared__ double smem[THREADSPERBLOCK];
-    const long long gid = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long gid = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     double val = 0.0;
     if (gid < batch) { double d = (double)target[gid] - (double)X[gid * col + (int)t_idx[gid]]; val = d * d; }
     val = block_reduce_sum(val, smem);
@@ -1892,17 +1881,16 @@ __global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restr
 
 __global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int batch, const int col, const bool last, const bool full)
 {
-    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= batch) return;
     const float factor =  2.0 * (X[idx * col + (int)t_idx[idx]] - target[idx]);
     if(last) out[idx] += factor / (float)batch;
     else     out[idx] += factor*grad[0] / (float)batch;
 }
 
-
-__global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict__ max, const float * __restrict__ min, const int batch, const long long total_size) 
+__global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict__ max, const float * __restrict__ min, const int batch, const unsigned long long total_size) 
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total_size){return;} // 2(x-a)/(b-a) - 1
     const int batch_idx = (global_idx / (total_size / batch));
     const float range = max[batch_idx] - min[batch_idx];
@@ -1910,7 +1898,7 @@ __global__ void BatchMinMaxNorm(float* __restrict__ X, const float * __restrict_
 
 }
 
-__global__ void BatchMinMaxDeNorm(float* __restrict__ X,const float max, const float min,const int batch, const long long total_size) // 
+__global__ void BatchMinMaxDeNorm(float* __restrict__ X,const float max, const float min,const int batch, const unsigned long long total_size) // 
 {
     const int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total_size){return;} // (y+1)(b-a)/2 + a
@@ -1919,27 +1907,26 @@ __global__ void BatchMinMaxDeNorm(float* __restrict__ X,const float max, const f
 
 }
 
-__global__ void StdNorm(float* __restrict__ X, const float img_max, const float mean, 
-                                            const float std, const long long total)
+__global__ void StdNorm(float* __restrict__ X, const float img_max, const float mean, const float std, const unsigned long long total)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total) return;
     X[idx] = ((X[idx] / img_max) - (float)mean) / (float)std; 
 }
 
 __global__ void StdDeNorm(float* __restrict__ X, const float img_max, const float mean, 
-                                            const float std, const long long total)
+                                            const float std, const unsigned long long total)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total) return;
     float val = ((X[idx] * std) + mean) * img_max; 
     X[idx] = fmaxf(0.0f, fminf(255.0f, val));
 }
 
-__global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const int t, const int T, const long long total_size)
+__global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const int t, const int T, const unsigned long long total_size)
 {   
 
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total_size){return;}
     const double s = 0.008;
     const double t_scale = ((double)t / T) + s;
@@ -1950,18 +1937,18 @@ __global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const
     X[global_idx]  = sqrt(alpha)*X[global_idx] + root_beta * noise[global_idx];
 }
 
-__global__ void UnifNoise(float* __restrict__ Y, const long long total_size, const uint64_t seed)
+__global__ void UnifNoise(float* __restrict__ Y, const float mean, const float std, const unsigned long long total_size, const uint64_t seed)
 {
     long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size){return;}
     curandStatePhilox4_32_10_t  state;
 
     curand_init(seed, global_idx, 0, &state);
-    const float epsilon = curand_uniform(&state);
+    const float epsilon = mean + curand_uniform(&state) * (std - mean);
     Y[global_idx] = epsilon;
 }
 
-__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const long long total_size, const uint64_t seed)
+__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const unsigned long long total_size, const uint64_t seed)
 {
     long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total_size) return;
@@ -1971,9 +1958,9 @@ __global__ void GaussianNoise(float* __restrict__ Y, const float mean, const flo
     Y[global_idx] = mean + std * curand_normal(&state);
 }
 
-__global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const long long total_size, const uint64_t seed)
+__global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const unsigned long long total_size, const uint64_t seed)
 {   
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total_size) return;
     curandStatePhilox4_32_10_t  state;
     curand_init(seed, global_idx, 0, &state);
@@ -1983,7 +1970,7 @@ __global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y,
 
 __global__ void BMax(const float* __restrict__ data, float* __restrict__ value, int batch, int channel, int out_size)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= batch*channel){return;}
     const int batch_idx = global_idx /channel;
     const int channel_idx = global_idx % channel;
@@ -1999,7 +1986,7 @@ __global__ void BMax(const float* __restrict__ data, float* __restrict__ value, 
 
 __global__ void BMin(const float* __restrict__ data, float* __restrict__ value, int batch, int channel, int out_size)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     const int batch_idx = global_idx / channel;
     const int channel_idx = global_idx % channel;
     if(global_idx >= batch*channel){return;}
@@ -2114,39 +2101,39 @@ __global__ void Accumulate_rmsnorm_kernel(const float* __restrict__ grad, const 
     }
 }
 
-__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv)
+__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const unsigned long long total_size, const int deriv)
 {
-    const long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
     if(global_idx >= total_size) return;
     if(deriv == 1) output[global_idx] += data[global_idx] * surrogate_deriv[global_idx];
     else{ output[global_idx] = expf(data[global_idx]);}
 }
 
-__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv)
+__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const unsigned long long total_size, const int deriv)
 {
-    const long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x *blockIdx.x;
     if(global_idx >= total_size) return;
     if(deriv == 1) output[global_idx] += surrogate_deriv[global_idx] / data[global_idx];
     else{ output[global_idx] = logf(data[global_idx]);}
 }
 
 __global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr,
-                             const int channels, const int row, const int col, const int type, const long long total_size)
+                             const int channels, const int row, const int col, const int type, const unsigned long long total_size)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
 
-    const int bc = idx / (row * col);
-    const int r  = (idx % (row * col)) / col;
-    const int c  = (idx % (row * col)) % col;
+    const unsigned int bc = idx / (row * col);
+    const unsigned int r  = (idx % (row * col)) / col;
+    const unsigned int c  = (idx % (row * col)) % col;
 
-    const int arr_idx = (type == 0) ? bc * row + r : bc * col + c;
+    const unsigned int arr_idx = (type == 0) ? bc * row + r : bc * col + c;
     output[idx] = expf(data[idx] - maxArr[arr_idx]);
 }
 
-__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size)
+__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const unsigned long long total_size)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (idx >= total_size) return;
 
     const int bc = idx / (row * col);
@@ -2159,12 +2146,10 @@ __global__ void exponentiateM(const float* __restrict__ data, float* __restrict_
     output[idx] = expf(data[idx] - maxArr[arr_idx]);
 }
 
-__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad,
-                              float* __restrict__ dinput,
-                              const int batch, const int channels, const int row, const int col,
-                              const int type)
+__global__ void deriv_softmax(const float* __restrict__ output, const float* __restrict__ grad, float* __restrict__ dinput, 
+                              const int batch, const int channels, const int row, const int col, const int type)
 {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (type == 0) {
         if (global_idx >= batch * channels * row) return;
@@ -2172,24 +2157,24 @@ __global__ void deriv_softmax(const float* __restrict__ output, const float* __r
 
         float dot = 0.0f;
         for (int c = 0; c < col; ++c) {
-            int idx = bc * row * col + r * col + c;
+            const unsigned long long idx = (unsigned long long)bc * row * col + (unsigned long long)r * col + c;
             dot += grad[idx] * output[idx];
         }
         for (int c = 0; c < col; ++c) {
-            int idx = bc * row * col + r * col + c;
+            const unsigned long long idx = (unsigned long long)bc * row * col + (unsigned long long)r * col + c;
             atomicAdd(&dinput[idx], output[idx] * (grad[idx] - dot));
         }
     } else {
         if (global_idx >= batch * channels * col) return;
-        int bc = global_idx / col, c = global_idx % col;
+        const unsigned long long bc = global_idx / col, c = global_idx % col;
 
         float dot = 0.0f;
         for (int r = 0; r < row; ++r) {
-            int idx = bc * row * col + r * col + c;
+        const unsigned long long idx = (unsigned long long)bc * row * col + (unsigned long long)r * col + c;
             dot += grad[idx] * output[idx];
         }
         for (int r = 0; r < row; ++r) {
-            int idx = bc * row * col + r * col + c;
+        const unsigned long long idx = (unsigned long long)bc * row * col + (unsigned long long)r * col + c;
             atomicAdd(&dinput[idx], output[idx] * (grad[idx] - dot));
         }
     }
@@ -2199,7 +2184,7 @@ void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __r
              const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb        = THREADSPERBLOCK;
-    const long long total_size = (long long)batch * channels * row * col;
+    const unsigned long long total_size = (unsigned long long)batch * channels * row * col;
     const int max_elems  = (type == 0) ? batch * channels * row
                                        : batch * channels * col;
 
@@ -2226,7 +2211,7 @@ void SoftMask(const float* __restrict__ data, float* __restrict__ arr, float* __
               const int batch, const int channels, const int row, const int col, const int type)
 {
     const int tpb        = THREADSPERBLOCK;
-    const long long total_size = (long long)batch * channels * row * col;
+    const unsigned long long total_size = (unsigned long long)batch * channels * row * col;
     const int max_elems  = (type == 0) ? batch * channels * row
                                        : batch * channels * col;
 
@@ -2291,28 +2276,15 @@ __global__ void SumSquaredSqrtCols(const float* __restrict__ data, float* __rest
     arr[gid] = sqrtf(sum);
 }
 
-__global__ void ISNAN(const float* __restrict__ X, const long long total)
+__global__ void GatherEmbeddings(float* __restrict__ output,const float* __restrict__ EmbedSpace,const int* __restrict__ keys, int c, int max_c, const int embed_dim, const unsigned long long total)
 {
-    const long long idx = threadIdx.x + blockDim.x*blockIdx.x;
-    if(idx >= total) return;
-    if(X[idx] != X[idx])
-    {
-        if (idx == 0) printf("NaN at idx=%lld, value=%f\n", idx, X[idx]);
-        __trap();
-    }
-    return;
-}
-
-__global__ void GatherEmbeddings(float* __restrict__ output,const float* __restrict__ EmbedSpace, const int* __restrict__ keys, int c,int max_c, int embed_dim,long long total)
-{
-
-    const long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    const unsigned long long global_idx = threadIdx.x + blockIdx.x * blockDim.x;
     if(global_idx >= total) return;
     
-    const int batch_idx = global_idx / (c * embed_dim);
-    const int key_row = global_idx % (c * embed_dim);
-    const int token_idx = key_row / embed_dim;
-    const int dim_idx = key_row  % embed_dim;
+    const unsigned int batch_idx = global_idx / (c * embed_dim);
+    const unsigned int key_row = global_idx % (c * embed_dim);
+    const unsigned int token_idx = key_row / embed_dim;
+    const unsigned int dim_idx = key_row  % embed_dim;
     const int key = keys[batch_idx * max_c + token_idx];
     
     // For masked positions, output zero
@@ -2380,7 +2352,7 @@ __global__ void TopKSampleKernel(const float* __restrict__ arr, int* __restrict_
 
 __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const int size)
 {
-    int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if (global_idx > 0) return;
     int max_idx = 0;
     float max_val = arr[0];
@@ -2393,21 +2365,19 @@ __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const
     X[0] = max_idx;
 }
 
-__global__ void identityKernel(float* __restrict__ input, const int batch, const int channels, const int row_col)
+__global__ void identityKernel(float* __restrict__ input, const int B, const int C, const int R, const float scale)
 {
-    const long long total = (long long)batch * channels * row_col;
-    const long long idx = threadIdx.x + blockDim.x* blockIdx.x;
+    const unsigned long long total = (unsigned long long)B * C * R * R;
+    const unsigned long long idx = threadIdx.x + blockDim.x* blockIdx.x;
     if(idx >= total) return;
-    const int mat = row_col * row_col;
-    const int depth = channels * mat;
-    const int bc_idx = idx / row_col;
-    const int b_idx = bc_idx / channels;
-    const int c_idx = bc_idx % channels;
-    const int r_idx = idx % row_col;
-    input[b_idx * depth + c_idx * mat + r_idx * row_col + r_idx] = 1.0f;
+    const int mat = R * R;
+    const int h_idx = (idx % mat) / R;
+    const int w_idx = (idx % R); 
+    if(h_idx == w_idx) input[idx] = scale;
+    else input[idx] = 0.f;
 }
 
-__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv)
+__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const unsigned long long total, const int deriv)
 {
     int global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total) return;
@@ -2417,9 +2387,9 @@ __global__ void clampKernel(const float* __restrict__ input, const float* __rest
 }
 
 __global__ void minKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
-                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv)
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const unsigned long long size, const int deriv)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= size) return;
     const float A = inp_A[idx], B = inp_B[idx]; // 1.0f A, -1.0f B;
     const float val = (A > B) ? B : A;
@@ -2434,9 +2404,9 @@ __global__ void minKernel(const float* __restrict__ inp_A, const float* __restri
 }
 
 __global__ void maxKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
-                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv)
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const unsigned long long size, const int deriv)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= size) return;
     const float A = inp_A[idx], B = inp_B[idx]; // 1.0f A, -1.0f B;
     const float val = (A < B) ? B : A;
@@ -2450,9 +2420,9 @@ __global__ void maxKernel(const float* __restrict__ inp_A, const float* __restri
 
 }
 
-__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv)
+__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const unsigned long long total, const bool deriv)
 {
-    const long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(idx >= total) return;
     const int ac_id = actions[idx];
     if(deriv) output[idx * action_dim + ac_id] += input[idx];
@@ -2479,6 +2449,37 @@ __global__ void static_assign_values( const float* __restrict__ traj, const floa
     }
 
     out_states[i * state_dim + d] = states[t * state_dim + d];
+}
+
+__global__ void gather_trajectory(
+    const float* __restrict__ rep_state, const float* __restrict__ rep_traj,
+    const float* __restrict__ rep_advantages, const float* __restrict__ rep_returns,
+    const int start, const int T, const int state_total,
+    float* __restrict__ out_states, float* __restrict__ out_actions,
+    float* __restrict__ out_log_probs_old, float* __restrict__ out_advantages,
+    float* __restrict__ out_returns)
+{
+    const long long total_work = (long long)T * state_total;
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_work) return;
+
+    const int feat = idx % state_total;
+    const int t    = idx / state_total;
+
+    const int src_step = start + t;
+    const long long src_state_off = (long long)src_step * state_total;
+    const long long dst_state_off = (long long)t * state_total;
+
+    out_states[dst_state_off + feat] = rep_state[src_state_off + feat];
+
+    if (feat == 0)
+    {
+        const int a_off = src_step * 5;
+        out_actions[t]       = rep_traj[a_off + 0];
+        out_log_probs_old[t] = rep_traj[a_off + 2];
+        out_advantages[t]    = rep_advantages[src_step];
+        out_returns[t]       = rep_returns[src_step];
+    }
 }
 
 __global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, float* __restrict__ state, 
@@ -2511,12 +2512,15 @@ __global__ void scatter_images_kernel(const float* __restrict__ d_src, float* __
     d_out[img * img_size + pix] = d_src[src_base + pix];
 }
 
-__global__ void onehot_kernel(float* __restrict__ d_labels,  const int* __restrict__ d_row_idx, const float* __restrict__ d_src, int stride)
+__global__ void onehot_kernel(float* __restrict__ labels, const int* __restrict__ row_idx, const float* __restrict__ src,int batch, int stride)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= 10) return;
-    int lbl = static_cast<int>(d_src[d_row_idx[i] * stride]);
-    d_labels[i * 10 + lbl] = 1.f;
+    if (i >= batch) return;
+
+    int row = row_idx[i];
+    int lbl = static_cast<int>(src[row * stride]);
+
+    labels[i * 10 + lbl] = 1.0f;
 }
 
 __global__ void cl_scatter_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int* __restrict__ d_src_rows, int stride, int img_size)
@@ -2540,13 +2544,13 @@ __global__ void cl_target(float* target, const int batch, const int total) //  a
 
 __global__ void nceKernel(const float* __restrict__ X, float* __restrict__ Y, const int num_pos, const int num_neg, const int b)
 {
-    const long long w_in  = 1 + num_pos + num_neg;
-    const long long w_out = num_pos;
-    const long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx >= (long long)b * w_out) return;
+    const unsigned long long w_in  = 1 + num_pos + num_neg;
+    const unsigned long long w_out = num_pos;
+    const unsigned long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= (unsigned long long)b * w_out) return;
 
-    const long long b_idx = idx / w_out;
-    const long long p_idx = idx % w_out;       
+    const unsigned long long b_idx = idx / w_out;
+    const unsigned long long p_idx = idx % w_out;       
 
     float sum_neg = 0.f;
     for (int i = 0; i < num_neg; ++i) sum_neg += expf(X[b_idx * w_in + 1 + num_pos + i]);
@@ -2557,13 +2561,13 @@ __global__ void nceKernel(const float* __restrict__ X, float* __restrict__ Y, co
 
 __global__ void nceDerivKernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ dX, const int num_pos, const int num_neg, const int b)
 {
-    const long long w_in  = 1 + num_pos + num_neg;
-    const long long w_out = num_pos;
-    const long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx >= (long long)b * w_in) return;
+    const unsigned long long w_in  = 1 + num_pos + num_neg;
+    const unsigned long long w_out = num_pos;
+    const unsigned long long idx   = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= (unsigned long long)b * w_in) return;
 
-    const long long b_idx = idx / w_in;
-    const long long w_idx = idx % w_in;
+    const unsigned long long b_idx = idx / w_in;
+    const unsigned long long w_idx = idx % w_in;
 
     if (w_idx == 0) return;                
 
@@ -2574,7 +2578,7 @@ __global__ void nceDerivKernel(const float* __restrict__ X, const float* __restr
     if (w_idx < 1 + num_pos)
     {
         // Positive: w_idx in [1, num_pos], maps to grad index p_idx = w_idx - 1
-        const long long p_idx   = w_idx - 1;
+        const unsigned long long p_idx   = w_idx - 1;
         const float     g       = grad[b_idx * w_out + p_idx]; 
         const float     pos     = expf(X[b_offset + w_idx]);
         dX[idx] += g * (pos / (pos + sum_neg) - 1.f) / num_pos;
@@ -2596,10 +2600,34 @@ __global__ void nceDerivKernel(const float* __restrict__ X, const float* __restr
 }
 
 // ============= Linear Algebra Functions ============= //
+__global__ void only_diagonal_kernel(const float* __restrict__ X, float* __restrict__ Y, const int B, const int C, const int H)
+{
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    const unsigned long long total = (unsigned long long)B * C * H * H;
+    if (idx >= total) return;
+    const int mat_size = H * H;
+    const int h_id = (idx % mat_size) / H;
+    const int w_id = (idx % H); 
+    if(h_id == w_id) Y[idx] = X[idx];
+    else Y[idx] = 0.f;
+}
+
+__global__ void diagonalKernel(const float* __restrict__ X, float* __restrict__ output, const int B, const int C, const int H)
+{
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    const unsigned long long total = (unsigned long long)B * C * H;
+    if (idx >= total) return;
+    const int mat_size = H * H;
+    const int bc_idx = idx / H;
+    const int bc_off = bc_idx * mat_size;
+    const int h_id = idx % H;
+    output[idx] = X[bc_off + h_id * H + h_id];
+}
+
 __global__ void scalar_diagonal_sum(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H)
 {
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
-    const long long total = (long long)B * C;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    const unsigned long long total = (unsigned long long)B * C;
     if (idx >= total) return;
     float val = 0.0f;
     for(int i = 0; i < H; ++i) val += A[idx * H * H + i * H + i];
@@ -2608,8 +2636,8 @@ __global__ void scalar_diagonal_sum(const float* __restrict__ A, float* __restri
 
 __global__ void scalar_diagonal_product(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H)
 {
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
-    const long long total = (long long)B * C;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    const unsigned long long total = (unsigned long long)B * C;
     if (idx >= total) return;
     double val = 1.0f;
     for(int i = 0; i < H; ++i) val *= (double)A[idx * H * H + i * H + i];
@@ -2621,7 +2649,7 @@ __global__ void upper_triangular_factorization(float* __restrict__ U, const int 
     /*
     @brief: Before function call, L has to be the Identity and U has to have all the data of X
     */
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     if(idx >= batch * channels) return;
     const int bc_idx = idx;
     const int mat_size = H * W;
@@ -2646,7 +2674,7 @@ __global__ void lu_factorization(float* __restrict__ L, float* __restrict__ U, c
     /*
     @brief: Before function call, L has to be the Identity and U has to have all the data of X
     */
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     if(idx >= batch * channels) return;
     const int bc_idx = idx;
     const int mat_size = H * W;
@@ -2672,22 +2700,19 @@ __global__ void lu_factorization(float* __restrict__ L, float* __restrict__ U, c
 
 __global__ void solveLX(const float* __restrict__ L, float* __restrict__ X, const int B, const int C, const int H)
 {
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
     // L = [H x H] where (H == W) since matrix needs to be N x N for inverse
-    // Also assumes out is properly Zero'd out before computing
     if(idx >= B * C * H) return;
     const int bc_idx = idx / H;
     const int mat_size = H * H;
     const int h_id = idx % H;
-    const int bc_off = bc_idx * mat_size;
-    const float target = static_cast<float>(h_id == 0);
-    
+    const int bc_off = bc_idx * mat_size;    
     for(int i = 0; i < H; ++i)
     {
         float sum = 0.f;
         if(i == 0)
         {           
-            X[bc_off + h_id * H + i] = target / L[bc_off + i * H + i];
+            X[bc_off + i* H + h_id] = static_cast<float>(h_id == 0) / L[bc_off + i * H + i];
             continue;
         };
 
@@ -2700,8 +2725,8 @@ __global__ void solveLX(const float* __restrict__ L, float* __restrict__ X, cons
 
 __global__ void solveUy(const float* __restrict__ U, const float* __restrict__ Y, float* __restrict__ X, const int B, const int C, const int H)
 {
-    const long long idx = threadIdx.x + (long long)blockIdx.x * blockDim.x;
-    if (idx >= (long long)B * C * H) return;
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    if (idx >= (unsigned long long)B * C * H) return;
     const int bc_idx   = idx / H;
     const int h_id     = idx % H;
     const int mat_size = H * H;
@@ -2712,4 +2737,217 @@ __global__ void solveUy(const float* __restrict__ U, const float* __restrict__ Y
         for (int j = i + 1; j < H; ++j) sum += U[bc_off + i * H + j] * X[bc_off + j * H + h_id];
         X[bc_off + i * H + h_id] = (Y[bc_off + i * H + h_id] - sum) / U[bc_off + i * H + i];
     }
+}
+
+__global__ void augmentedRowReduction(float* __restrict__ X, float* __restrict__ Y, const int B, const int C, const int H)
+{
+    const unsigned long long idx = threadIdx.x + (unsigned long long)blockIdx.x * blockDim.x;
+    if (idx >= (unsigned long long)B * C) return;
+
+    const int mat_size = H * H;
+    const int bc_off   = (int)idx * mat_size;
+
+    float* Xm = X + bc_off; 
+    float* Ym = Y + bc_off;  
+
+    for (int k = 0; k < H; ++k)
+    {
+        int pivot_row = k;
+        float max_val = fabsf(Xm[k * H + k]);
+        for (int i = k + 1; i < H; ++i)
+        {
+            float v = fabsf(Xm[i * H + k]);
+            if (v > max_val) { max_val = v; pivot_row = i; }
+        }
+
+        if (pivot_row != k)
+        {
+            for (int j = 0; j < H; ++j)
+            {
+                float tmp       = Xm[k * H + j];
+                Xm[k * H + j]  = Xm[pivot_row * H + j];
+                Xm[pivot_row * H + j] = tmp;
+
+                tmp                   = Ym[k * H + j];
+                Ym[k * H + j]         = Ym[pivot_row * H + j];
+                Ym[pivot_row * H + j] = tmp;
+            }
+        }
+
+        float diag = Xm[k * H + k];
+        if (diag == 0.0f) continue;
+
+        float inv_diag = 1.0f / diag;
+        for (int j = 0; j < H; ++j)
+        {
+            Xm[k * H + j] *= inv_diag;
+            Ym[k * H + j] *= inv_diag;
+        }
+        for (int i = 0; i < H; ++i)
+        {
+            if (i == k) continue;
+            float factor = Xm[i * H + k];
+            if (factor == 0.0f) continue;
+            for (int j = 0; j < H; ++j)
+            {
+                Xm[i * H + j] -= factor * Xm[k * H + j];
+                Ym[i * H + j] -= factor * Ym[k * H + j];
+            }
+        }
+    }
+}
+
+__global__ void gram_schmidt_rows(float* __restrict__ Q, float* __restrict__ R, const int B, const int C, const int H)
+{
+    const int bc = blockIdx.x;
+    if (bc >= B * C) return;
+    float* __restrict__ M  = Q + bc * H * H; 
+    float* __restrict__ Rm = R + bc * H * H;
+    __shared__ float s_row[THREADSPERBLOCK];   
+    const int j = threadIdx.x;
+    for (int i = 0; i < H; ++i)
+    {
+        float uu = 0.0f;
+        float uv = 0.0f;
+        for (int t = 0; t < (H + THREADSPERBLOCK - 1) / THREADSPERBLOCK; ++t)
+        {
+            const int r = t * THREADSPERBLOCK + threadIdx.x;
+            s_row[threadIdx.x] = (r < H) ? M[i * H + r] : 0.0f;
+            __syncthreads();
+            const int tile_end = min(THREADSPERBLOCK, H - t * THREADSPERBLOCK);
+            for (int k = 0; k < tile_end; ++k)
+            {
+                const float ui_k = s_row[k];
+                uu += ui_k * ui_k;
+                if (j < H) uv += ui_k * M[j * H + (t * THREADSPERBLOCK + k)];
+            }
+            __syncthreads();
+        }
+
+        if (j == i && j < H) Rm[i * H + i] = (uu > 1e-10f) ? sqrtf(uu) : 0.0f;
+        if (j > i && j < H) Rm[i * H + j] = (uu > 1e-10f) ? (uv * rsqrtf(uu)) : 0.0f;
+        if (j < i && j < H) Rm[i * H + j] = 0.0f; 
+        const float scale = (j > i && j < H && uu > 1e-10f) ? (uv / uu) : 0.0f;
+        for (int t = 0; t < (H + THREADSPERBLOCK - 1) / THREADSPERBLOCK; ++t)
+        {
+            const int r = t * THREADSPERBLOCK + threadIdx.x;
+            s_row[threadIdx.x] = (r < H) ? M[i * H + r] : 0.0f;
+            __syncthreads();
+            if (j > i && j < H)
+            {
+                const int tile_end = min(THREADSPERBLOCK, H - t * THREADSPERBLOCK);
+                for (int k = 0; k < tile_end; ++k)
+                    M[j * H + (t * THREADSPERBLOCK + k)] -= scale * s_row[k];
+            }
+            __syncthreads();
+        }
+
+        if (j == i && uu > 1e-10f)
+        {
+            const float inv_norm = rsqrtf(uu);
+            for (int r = 0; r < H; ++r) M[i * H + r] *= inv_norm;
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void gram_schmidt_cols(float* __restrict__ Q, float* __restrict__ R, const int B, const int C, const int H)
+{
+    const int bc = blockIdx.x;
+    if (bc >= B * C) return;
+    float* __restrict__ M  = Q + bc * H * H;
+    float* __restrict__ Rm = R + bc * H * H;
+    __shared__ float s_col[THREADSPERBLOCK];
+    const int j = threadIdx.x;
+    for (int i = 0; i < H; ++i)
+    {
+        float uu = 0.0f;
+        float uv = 0.0f;
+        for (int t = 0; t < (H + THREADSPERBLOCK - 1) / THREADSPERBLOCK; ++t)
+        {
+            const int r = t * THREADSPERBLOCK + threadIdx.x;
+            s_col[threadIdx.x] = (r < H) ? M[r * H + i] : 0.0f;        
+            __syncthreads();
+            const int tile_end = min(THREADSPERBLOCK, H - t * THREADSPERBLOCK);
+            for (int k = 0; k < tile_end; ++k)
+            {
+                const float ui_k = s_col[k];
+                uu += ui_k * ui_k;
+                if (j < H) uv += ui_k * M[(t * THREADSPERBLOCK + k) * H + j]; 
+            }
+            __syncthreads();
+        }
+
+        if (j == i && j < H) Rm[j + j * H] = (uu > 1e-10f) ? sqrtf(uu) : 0.0f; // R[i,i]
+        if (j > i && j < H) Rm[j + i * H] = (uu > 1e-10f) ? (uv * rsqrtf(uu)) : 0.0f; // R[i,j] upper triangle
+        if (j < i && j < H) Rm[j + i * H] = 0.0f;                                // R[i,j] lower triangle
+        const float scale = (j > i && j < H && uu > 1e-10f) ? (uv / uu) : 0.0f;
+        for (int t = 0; t < (H + THREADSPERBLOCK - 1) / THREADSPERBLOCK; ++t)
+        {
+            const int r = t * THREADSPERBLOCK + threadIdx.x;
+            s_col[threadIdx.x] = (r < H) ? M[r * H + i] : 0.0f;       
+            __syncthreads();
+            if (j > i && j < H)
+            {
+                const int tile_end = min(THREADSPERBLOCK, H - t * THREADSPERBLOCK);
+                for (int k = 0; k < tile_end; ++k)
+                    M[(t * THREADSPERBLOCK + k) * H + j] -= scale * s_col[k]; 
+            }
+            __syncthreads();
+        }
+
+        if (j == i && uu > 1e-10f)
+        {
+            const float inv_norm = rsqrtf(uu);
+            for (int r = 0; r < H; ++r) M[r * H + i] *= inv_norm;       
+        }
+        __syncthreads();
+    }
+}
+
+__global__ void frechet_preparation(const float* __restrict__ X, const float* __restrict__ dY, float* __restrict__ dX, const unsigned int B, const unsigned int C, const unsigned int H)
+{
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long total = 4ULL*B*C*H*H;
+    if(idx >= total) return;
+
+    const unsigned long long mat_size = 4ULL*H*H;
+    const unsigned int b_idx = idx / (4ULL*C*H*H);
+    const unsigned int c_idx = (idx / mat_size) % C;
+    const unsigned int h_idx = (idx % mat_size) / (2*H);
+    const unsigned int w_idx = (idx % mat_size) % (2*H);
+
+    const unsigned long long base = (unsigned long long)b_idx*C*H*H + (unsigned long long)c_idx*H*H;
+
+    if (h_idx < H && w_idx < H) {
+        // A_00 = X^T
+        dX[idx] = X[base + w_idx*H + h_idx];
+    }
+    else if (h_idx >= H && w_idx >= H) {
+        // A_11 = X^T
+        dX[idx] = X[base + (w_idx-H)*H + (h_idx-H)];
+    }
+    else if (h_idx >= H && w_idx < H) {
+        // A_10 = 0
+        dX[idx] = 0.f;
+    }
+    else {
+        // A_01 = dY (straight, no transpose — paired with X^T on diagonal)
+        dX[idx] = dY[base + h_idx*H + (w_idx-H)];
+    }
+}
+
+__global__ void collect_frechet(const float* __restrict__ dY, float* __restrict__ dX,  const unsigned int B, const unsigned int C, const unsigned int H)
+{
+    const unsigned long long idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long total = (unsigned long long)B*C*H*H;
+    if(idx >= total) return;
+
+    const unsigned long long mat_size = H*H;
+    const unsigned int b_idx = idx / (C*H*H);
+    const unsigned int c_idx = (idx / mat_size) % C;
+    const unsigned int h_idx = (idx % mat_size) / H;
+    const unsigned int w_idx = idx % H;
+    const unsigned long long ndx = b_idx*4ULL*C*H*H + c_idx*4ULL*H*H + h_idx*(2ULL*H) + (H + w_idx);
+    dX[idx] += dY[ndx];
 }

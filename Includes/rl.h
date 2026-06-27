@@ -241,3 +241,126 @@ struct DQNTrainer
     
 };
 
+template<class AC>
+struct TPPOTrainer  // Trajectory based PPO Trainer
+{
+    AC &ac;
+    RL_Replay &rep;
+    GraphOperations &go;
+    float clip_eps, c1, c2;
+    int   epochs, batch;
+    std::mt19937 rng{std::random_device{}()};
+
+    TPPOTrainer(GraphOperations& go, AC& ac, RL_Replay& replay, const int ppo_epochs = 4, const float c1_ = 0.5f, const float c2_ = 0.01f, const float clip_eps_ = 0.2f) 
+    : go(go), ac(ac), rep(replay), epochs(ppo_epochs), c1(c1_), c2(c2_), clip_eps(clip_eps_){ };
+
+    graph loss(const graph& states, const graph& actions, const graph& log_prob, const graph& advantages, const graph& returns)
+    {
+        auto [probs, v_pred] = ac.train(states); // [B x T x 4], // [B x T x 1]
+        auto log_probs_new = go.Log(probs);  log_probs_new->op_name = "New Log Probabilities"; // [B x T x A]
+        auto log_pa_new    = go.GatherAction(log_probs_new, actions); log_pa_new->op_name = "New Log Action Probability"; // [B x T x 1]
+        auto log_ratio = go.Subtract(log_pa_new, log_prob); log_ratio->op_name = "Log Ratio"; // [B x T x 1]
+        auto ratio     = go.Exp(log_ratio); ratio->op_name = "Ratio"; //[B x T x 1]
+        auto obj1   = go.Multiply(ratio, advantages); obj1->op_name = "Objective 1"; // [B x T x 1]
+        auto obj2   = go.Multiply(go.Clamp(ratio, 1.0f - clip_eps, 1.0f + clip_eps), advantages); obj2->op_name = "Objective 2"; //[B x T x 1]
+        auto L_clip = go.Scale(go.BATCHMEAN(go.Min(obj1, obj2)), -1.0f); L_clip->op_name = "Policy Loss Function";     //[1 x 1]
+        auto L_vf   = go.Scale(go.MeanSquaredError(v_pred, returns, false), c1); L_vf->op_name = "Value Function Loss";//[1 x 1]
+        auto L_ent  = go.Scale(go.BATCHMEAN(go.Entropy(probs)), -c2); L_ent->op_name = "Entropy Loss"; // [1 x 1]
+        auto Last   = go.Add(go.Add(L_clip, L_vf), L_ent, true); Last->op_name = "Final PPO Loss";     // [1 x 1]
+        return Last;
+    };
+
+    void loop(const graph &states_g, const graph &actions_g, const graph &log_probs_old, const graph &advantages_g, const graph &returns_g, const std::vector<std::pair<int,int>> &batch_trajectories)
+    {
+    const int n_traj = (int)batch_trajectories.size();
+    const int tpb    = THREADSPERBLOCK;
+    std::vector<int> traj_idx(n_traj);
+    std::iota(traj_idx.begin(), traj_idx.end(), 0);
+
+    for (int epoch = 0; epoch < epochs; ++epoch){
+    std::shuffle(traj_idx.begin(), traj_idx.end(), rng);
+    for (int i = 0; i < n_traj; ++i)
+    {
+        const auto [start, T] = batch_trajectories[traj_idx[i]];
+
+        states_g->dim[2]      = T;
+        actions_g->dim[2]     = T;
+        log_probs_old->dim[2] = T;
+        advantages_g->dim[2]  = T;
+        returns_g->dim[2]     = T;
+
+        const long long total_work = (long long)T * rep.state_total;
+        const int bpg = (int)((total_work + tpb - 1) / tpb);
+        gather_trajectory<<<bpg, tpb>>>( rep.state, rep.traj, rep.advantages, rep.returns,
+        start, T, rep.state_total, states_g->output, actions_g->output,
+        log_probs_old->output, advantages_g->output, returns_g->output);
+        CheckError("Gather Trajectory");
+
+        auto final = loss(states_g, actions_g, log_probs_old, advantages_g, returns_g);
+
+        go.zero_grad(final);
+        go.forward();
+        go.backward();
+        go.ParameterUpdate(nullptr, false, 1e-3f);
+
+        cudaMemcpy(&ac.pi_loss, go.nodes.end()[-1]->inputs[0]->inputs[0]->output, sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&ac.v_loss , go.nodes.end()[-1]->inputs[0]->inputs[1]->inputs[0]->output, sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&ac.entropy, go.nodes.end()[-1]->inputs[1]->inputs[0]->output, sizeof(float), cudaMemcpyDeviceToHost);
+
+        go.clear_graph();
+        CheckError("PPO Loop");
+    }}
+    }
+    
+    void update(const graph &states_g, const std::vector<std::pair<int,int>> &batch_trajectories, const float next_val = 0.0f, const float gamma = 0.99f, const float lam = 0.95f)
+    {
+        returns(gamma, lam, next_val);
+        auto actions_g       = std::make_shared<NodeBackProp>("A|S_H", 1, 1, rep.total, 1, 1);
+        auto log_probs_old_g = std::make_shared<NodeBackProp>("π_old(a|s)", 1, 1, rep.total, 1, 1);
+        auto advantages_g    = std::make_shared<NodeBackProp>("A_t", 1, 1, rep.total, 1, 1);
+        auto returns_g       = std::make_shared<NodeBackProp>("G_t", 1, 1, rep.total, 1, 1);
+
+        loop(states_g, actions_g, log_probs_old_g, advantages_g, returns_g, batch_trajectories);
+        actions_g->clear(); log_probs_old_g->clear(); advantages_g->clear(); returns_g->clear();
+        go.clear_graph();
+    };
+
+    void returns(const float gamma, const float lam, const float next_val = 0.0f) 
+    {
+        int N = rep.total;
+        std::vector<float> traj(N * 5);
+        cudaMemcpy(traj.data(), rep.traj, N * 5 * sizeof(float), cudaMemcpyDeviceToHost);
+        std::vector<float> advantages(N), returns(N);
+
+        float gae        = 0.f;
+        float next_value = next_val;
+        for (int t = N - 1; t >= 0; --t)
+        {
+            int   a_off   = t * 5;
+            float reward  = traj[a_off + REPLAY::REWARD];
+            float value   = traj[a_off + REPLAY::VALUE];
+            float done    = traj[a_off + REPLAY::DONE];
+
+            float mask    = 1.f - done;                          
+            float delta   = reward + gamma * next_value * mask - value; 
+            gae           = delta  + gamma * lam * mask * gae;
+            advantages[t] = gae;
+            returns[t]    = gae + value; 
+            next_value    = value;
+        }
+
+        float mean = 0.f;
+        for (const float &a : advantages) mean += a;
+        mean /= (float)N;
+
+        float var = 0.f;
+        for (const float &a : advantages) var += (a - mean) * (a - mean);
+        var /= (float)N;
+
+        float inv_std = 1.f / sqrtf(var + 1e-27f);
+        for (float &a : advantages) a = (a - mean) * inv_std;
+
+        cudaMemcpy(rep.advantages, advantages.data(), N * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(rep.returns,    returns.data(),    N * sizeof(float), cudaMemcpyHostToDevice);
+    };
+};

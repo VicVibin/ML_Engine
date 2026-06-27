@@ -1,6 +1,16 @@
 #pragma once
 #include "engine.h"
-#include "text_loader.h"
+
+using Text = std::vector<str>;
+using BatchText = std::vector<Text>;
+
+struct BatchTexts
+{
+    BatchText encoder;
+    BatchText decoder;
+    BatchText target;
+    BatchTexts(int batch_size,int clen):encoder(batch_size,Text(clen+1)),decoder(batch_size,Text(clen+1)),target(batch_size,Text(clen+1)){}
+};
 
 struct KVCache 
 {
@@ -10,7 +20,9 @@ struct KVCache
     int max_len;
     int hidden;
     KVCache(int max_len, int hidden);
+    void init(int max_len, int hidden);
     void free();
+
 };
 
 class TextualEmbedding
@@ -25,13 +37,13 @@ public:
     */
     std::random_device rd;
     float* EmbedSpace;      // GPU embedding memory space [MAX_VOCAB_SIZE x embed_dim]
-    int* encoder_keys;              // GPU word index mapping to the embedding: [MAX_BATCH_SIZE x MAX_CONTEXT_LEN], changes each epoch
-    int* decoder_keys;
-    int* target_keys;
+    int* encoder_keys;      // GPU word index mapping to the embedding: [MAX_BATCH_SIZE x MAX_CONTEXT_LEN], changes each epoch
+    int* decoder_keys;      // GPU word index mapping to the embedding: [MAX_BATCH_SIZE x MAX_CONTEXT_LEN], changes each epoch
+    int* target_keys;       // GPU word index mapping to the embedding: [MAX_BATCH_SIZE x MAX_CONTEXT_LEN], changes each epoch
     Text input_text;        // Current input text batch
     std::unordered_map<str, int> WordSpace; // CPU word to key mapping
-    std::unordered_map<int, str> KeySpace; // CPU key to word mapping
-    std::unordered_set<str> Vocabulary; // Total set of all unique words which the index is the key
+    std::unordered_map<int, str> KeySpace;  // CPU key to word mapping
+    std::unordered_set<str> Vocabulary;     // Total set of all unique words which the index is the key
     const int MAX_BATCH_SIZE, MAX_CONTEXT_LEN, MAX_VOCAB_SIZE;
     const int embed_dim;
     const int tpb = THREADSPERBLOCK; 
@@ -47,8 +59,10 @@ public:
     void encodeBatch(const BatchText&  batch_texts, const str key);
     void forward(const graph& X, const str key);
     void rforward(const graph&X, const str key, const int start_idx = 0);
-    void one_hot_forward(const graph&X);
     void EmbeddingUpdate(const graph&X, const str key);
+    void save(const str& filepath) const;
+    void load(const str& filepath);
+    void load_replace(const str& filepath);
 };
 
 class DataLoading
@@ -69,7 +83,7 @@ public:
     const int context_len;
     DataLoading(TextualEmbedding& embed_ref, const Text& db, const int batch, const int context);
     BatchTexts load_data();
-    graph forward(const BatchTexts& dataset, const str type = "E");
+    graph forward(std::shared_ptr<BatchTexts> dataset, const str type = "E");
 };
 
 class SingleHeadAttention
@@ -77,14 +91,14 @@ class SingleHeadAttention
 public:
     const int embed_dim;
     const int hidden;
-    Linear *q, *k, *v, *out;
+    Linear q, k, v, out;
     const str type;
     SingleHeadAttention(const int embed_dim, const int t_hidden, const int num_heads = 0);
     void save(std::ofstream& f) const;
     void load(std::ifstream& f);
     graph forward(const graph&X, const bool mask = false);
     graph cross_forward(const graph& X, const graph& Y);
-    graph cached_forward(const graph& X_new, KVCache&cache, const int start_idx, bool mask = true);
+    graph cached_forward(const graph& X_new, KVCache&cache, bool mask = true);
     graph cached_cross_forward(const graph& X_new, KVCache& cache);
     
 };
@@ -97,7 +111,7 @@ public:
     const int num_heads;
     int head_dim;
     str name;
-    Linear *q, *k, *v, *o;
+    Linear q, k, v, o;
 
     MultiHeadAttention(const int embed_dim, const int hidden, const int num_heads, const str& name = "MultiHeadAttention"); 
     void save(std::ofstream& f) const;
@@ -105,7 +119,7 @@ public:
 
     graph forward(const graph& X, const bool mask = false); 
     graph cross_forward(const graph& X, const graph& Y);
-    graph cached_forward(const graph& X_new, KVCache&cache, const int start_idx, bool mask = true);
+    graph cached_forward(const graph& X_new, KVCache&cache, bool mask = true);
     graph cached_cross_forward(const graph& X_new, KVCache& cache);
 };
 
@@ -123,9 +137,11 @@ private:
  
 public:
     LLM(TextualEmbedding& embed, const Text& Database, int batch, int clen, int hidden_dim=128, int num_heads=8);
-    void build_train(const BatchTexts& data);
+    std::tuple<graph, graph, graph> build_train(std::shared_ptr<BatchTexts> data);
     void generate(const Text& prompt, const int max_len = 0);
-    void train(const int num_batches, const int percent = 1, const float min_loss = 1e-2f);
+    void train(const int num_batches, const int percent = 1, const bool model_save = true, const str mod_path = "../LLM.bin", 
+    const bool embed_save = true, const str embed_path = "../embedding.temp");
     void save(const str& filename) const;
     void load(const str& filename);
 };
+

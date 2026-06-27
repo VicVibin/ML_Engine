@@ -11,15 +11,15 @@ static constexpr float PI  = 3.14159265359;
 using str = std::string;
 
 template <typename T>
-__global__ void fillKernel(T* data, T value, long long n) 
+__global__ void fillKernel(T* data, T value, unsigned long long n) 
 {
-    long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx  >= n) return;
     data[idx] = value;
 }
 
 template <typename T>
-void Zerograd(const str name, T* ptr, const long long total)
+void Zerograd(const str name, T* ptr, const unsigned long long total)
 {
     const int tpb = THREADSPERBLOCK;
     const int bpg = (total+tpb-1)/tpb;
@@ -45,7 +45,7 @@ __global__ void nth_row_kernel(const float* __restrict__ X, float* __restrict__ 
 
 __global__ void permute(const float* __restrict__ X, float* __restrict__ Y, int d0, int d1, int d2, int d3, int i0, int i1, int i2, int i3);
 
-__global__ void mulKernel(const float*  X, const float* Y, float*  Z, const long long total_size, const bool deriv = false);
+__global__ void mulKernel(const float*  X, const float* Y, float*  Z, const unsigned long long total_size, const bool deriv = false);
 
 __global__ void HeadifyColChannel(const float* __restrict__ input, float* __restrict__ output, const int B, const int req_channels, const int row, const int col, int flag);
 
@@ -128,9 +128,9 @@ __global__ void LayerMeanGrad(const float* __restrict__ ngrad, float* __restrict
 
 __global__ void BatchMeanGrad(const float* __restrict__ ngrad, float* __restrict__ igrad, const int B, const int channels, const int row, const int col);
 
-__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const long long size, const float p, const uint64_t seed, const int deriv =0);
+__global__ void dropoutKernel(const float* __restrict__ data, float* __restrict__ mask, float* __restrict__ output, const unsigned long long size, const float p, const uint64_t seed, const int deriv =0);
 
-__global__ void Standard_Weights(float* __restrict__ w, const long long size, const float scale, const uint64_t seed);
+__global__ void Standard_Weights(float* __restrict__ w, const unsigned long long size, const float scale, const uint64_t seed);
 
 __global__ void PadOutput(const float* __restrict__ input, float* __restrict__ output, const int B, const int channels, 
                           const int inH, const int inW, const int outH, const int outW, const int padTop, const int padLeft);
@@ -202,7 +202,7 @@ __global__ void CopynCrop(const float* __restrict__ X, float* __restrict__ Y, co
 
 __global__ void PaddingCrop(const float* __restrict__ X, float* __restrict__ Y, const int B,const int depth,const int a, const int b, const int c, const int d);
 
-__global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const long long total_size);
+__global__ void SumSquared(double* __restrict__ scale, const float* __restrict__ grad, const unsigned long long total_size);
 
 template <typename T>
 __global__ void Compare(const T* __restrict__ scale, const T* __restrict__ scale_test, int total)
@@ -226,9 +226,9 @@ __global__ void AdamWUpdate(float* __restrict__ output, const float* __restrict_
                            const float b1, const float b2, const float epsilon, const float lambda, const float lr);
 
 __global__ void KeyUpdate(float* __restrict__ EmbedSpace, const float* __restrict__ grad, const int* __restrict__ keys,const int clen, const int context_len, 
-                          const int embed_dim, const float lr, const long long total);
+                          const int embed_dim, const float lr, const unsigned long long total);
 
-__global__ void OneHotEmbeddings(float* __restrict__ output, const int* __restrict__ keys,int clen,int max_clen,int vocab_size,long long total_size);
+__global__ void OneHotEmbeddings(float* __restrict__ output, const int* __restrict__ keys,int clen,int max_clen,int vocab_size, const unsigned long long total_size);
 
 __global__ void BCompress(const float* __restrict__ X, float* __restrict__ Y, int B,int channels, int rows, int columns, const float scale = 1.0f);
 
@@ -241,15 +241,27 @@ __global__ void broadcast_add_backward(const float* __restrict__ grad_out, float
 
 __global__ void broadcast_add(const float*  __restrict__ X, const float*  __restrict__ bias, float*  __restrict__ output, const int B, const int kernels, const int row, const int col);
 
-__global__ void Write(const float* __restrict__ X, float* __restrict__ Y, const long long total);
+__global__ void Write(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total);
 
-__global__ void Scale_Write(const float* __restrict__ X, float* __restrict__ Y, const long long total, const float scale);
+template<typename T>
+__global__ void Write_Numerals(T* __restrict__ X, const unsigned long long total)
+{
+    const unsigned long long idx = threadIdx.x  + blockDim.x * blockIdx.x;
+    if(idx >= total) return;
+    X[idx] = idx;
+}
 
-__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const double scale = 1.0);
+__global__ void Scale_Write(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total, const float scale);
 
-__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const long long total_size, const float* scale);
+__global__ void AccumulateBC(const float* __restrict__ X, const float* __restrict__ scale, float* __restrict__ Y, const int B, const int C, const int H, const int W);
 
-__global__ void ScaleAdd(const float* __restrict__ X, const float* __restrict__ Y, float* __restrict__ Z, const float scale, const long long total_size);
+__global__ void SelfAdd(float* __restrict__ X, const unsigned long long total_size, const double scale);
+
+__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total_size, const double scale = 1.0);
+
+__global__ void Accumulate(const float* __restrict__ X, float* __restrict__ Y, const unsigned long long total_size, const float* scale);
+
+__global__ void ScaleAdd(const float* __restrict__ X, const float* __restrict__ Y, float* __restrict__ Z, const float scale, const unsigned long long total_size);
 
 __global__ void Update(float* __restrict__ output, const float*  __restrict__ grad, const int total_size, const double* __restrict__ scale, const float lr);
 
@@ -257,9 +269,9 @@ __global__ void Channel_Squeeze1D(const float* __restrict__ X, float*  __restric
 
 
 template <typename T1, typename T2>
-__global__ void SV(T1* __restrict__ X, const T2 scale, const long long total, const int type)
+__global__ void SV(T1* __restrict__ X, const T2 scale, const unsigned long long total, const int type)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const T1 factor = scale;
     if(type==0) X[global_idx] *= factor;
@@ -267,9 +279,9 @@ __global__ void SV(T1* __restrict__ X, const T2 scale, const long long total, co
 }
 
 template <typename T1, typename T2>
-__global__ void SG(const T1* __restrict__ X, T1* __restrict__ Y, const T2 scale, const long long total, const int deriv)
+__global__ void SG(const T1* __restrict__ X, T1* __restrict__ Y, const T2 scale, const unsigned long long total, const int deriv)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const T1 factor = scale;
     if(deriv==0) Y[global_idx] = X[global_idx] * factor;
@@ -278,9 +290,9 @@ __global__ void SG(const T1* __restrict__ X, T1* __restrict__ Y, const T2 scale,
 }
 
 template <typename T1, typename T2>
-__global__ void SP(T1* __restrict__ X, const T2 *scale, const long long total, const int type)
+__global__ void SP(T1* __restrict__ X, const T2 *scale, const unsigned long long total, const int type)
 {
-    const long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const unsigned long long global_idx = threadIdx.x + blockDim.x * blockIdx.x;
     if(global_idx >= total){return;}
     const T1 factor = scale[0];
     if(type==0) X[global_idx] *= factor;
@@ -291,25 +303,25 @@ __global__ void SP(T1* __restrict__ X, const T2 *scale, const long long total, c
 __global__ void Sqrt_Scale(double* __restrict__ X, const double scale, const int type = 0);
 
 
-__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
+__global__ void mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv);
 
-__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
+__global__ void  ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv);
 
-__global__ void   e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool deriv);
-
-
-__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total);
-
-__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const long long total);
-
-__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int B, const long long total);
+__global__ void   e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool deriv);
 
 
-__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total,const bool last, const bool full);
+__global__ void scalar_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const unsigned long long total);
 
-__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const long long total, const bool last, const bool full);
+__global__ void scalar_ce_kernel(const  float* __restrict__ X, const float* __restrict__ target, float*__restrict__ output, const unsigned long long total);
 
-__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int B, const long long total, const bool last, const bool full);
+__global__ void scalar_e_kernel( const  float* __restrict__ X, float* __restrict__ output, const int B, const unsigned long long total);
+
+
+__global__ void deriv_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total,const bool last, const bool full);
+
+__global__ void deriv_ce_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ grad, float* __restrict__ output, const unsigned long long total, const bool last, const bool full);
+
+__global__ void deriv_e_kernel(const float* __restrict__ X, const float* __restrict__ grad, float* __restrict__ output, const int B, const unsigned long long total, const bool last, const bool full);
 
 
 __global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, float* __restrict__ out, const int B, const int col);
@@ -317,21 +329,21 @@ __global__ void idx_mse_kernel(const float* __restrict__ X, const float* __restr
 __global__ void idx_mse_backward(const float* __restrict__ X, const float* __restrict__ target, const float* __restrict__ t_idx, const float* __restrict__ grad, float* __restrict__ out, const int B, const int col, const bool last, const bool full);
 
 
-__global__ void BatchMinMaxNorm(float* __restrict__ X, const float* __restrict__ max, const float *__restrict__ min, const int B, const long long total_size);
+__global__ void BatchMinMaxNorm(float* __restrict__ X, const float* __restrict__ max, const float *__restrict__ min, const int B, const unsigned long long total_size);
 
-__global__ void BatchMinMaxDeNorm(float* __restrict__ X, const float max, const float min,const int B, const long long total_size);
+__global__ void BatchMinMaxDeNorm(float* __restrict__ X, const float max, const float min,const int B, const unsigned long long total_size);
 
-__global__ void StdNorm(float* __restrict__ X, const float img_max, const float mean, const float std, const long long total);
+__global__ void StdNorm(float* __restrict__ X, const float img_max, const float mean, const float std, const unsigned long long total);
 
-__global__ void StdDeNorm(float* __restrict__ X, const float img_max, const float mean, const float std, const long long total);
+__global__ void StdDeNorm(float* __restrict__ X, const float img_max, const float mean, const float std, const unsigned long long total);
 
-__global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const int t, const int T, const long long total_size);
+__global__ void AddNoise(float* __restrict__ X, float* __restrict__ noise, const int t, const int T, const unsigned long long total_size);
 
-__global__ void UnifNoise(float*__restrict__ Y, const long long total_size, const uint64_t seed);
+__global__ void UnifNoise(float*__restrict__ Y, const float mean, const float std, const unsigned long long total_size, const uint64_t seed);
 
-__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const long long total_size, const uint64_t seed);
+__global__ void GaussianNoise(float* __restrict__ Y, const float mean, const float std, const unsigned long long total_size, const uint64_t seed);
 
-__global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const long long total_size, const uint64_t seed);
+__global__ void ReplaceNoise(float* __restrict__ X, const float* __restrict__ Y, const float beta, const unsigned long long total_size, const uint64_t seed);
 
 __global__ void BMax(const float* __restrict__ data, float* __restrict__ value, int B, int channel, int out_size);
 
@@ -347,10 +359,10 @@ __global__ void Scale_arr(float* __restrict__ data, const float* __restrict__ ar
 
 __global__ void Accumulate_rmsnorm_kernel(const float* __restrict__ grad, const float* __restrict__ normalized, const float* __restrict__ norms, float* __restrict__ x_grad, const int B, const int channels, const int row, const int col, const int type);
 
-__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
+__global__ void natural_logarithm(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const unsigned long long total_size, const int deriv=0);
 
-__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const long long total_size, const int deriv=0);
-__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size);
+__global__ void exponentiate(const float* __restrict__ data, const float* __restrict__ surrogate_deriv, float* __restrict__ output, const unsigned long long total_size, const int deriv=0);
+__global__ void exponentiate(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const unsigned long long total_size);
 
 void SoftMax(const float* __restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int B, const int channels, const int row, const int col, const int type);
 
@@ -358,7 +370,7 @@ __global__ void deriv_softmax(const float* __restrict__ output, const float* __r
 
 void deriv_SoftMax(const float* __restrict__ output,const float* __restrict__ grad, float* __restrict__ dinput, const int B,const int channels,const int row,const int col, const int type);
 
-__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const long long total_size);
+__global__ void exponentiateM(const float* __restrict__ data, float* __restrict__ output, const float* __restrict__ maxArr, const int channels, const int row, const int col, const int type, const unsigned long long total_size);
 
 void SoftMask(const float*__restrict__ data, float* __restrict__ arr, float* __restrict__ output, float* __restrict__ maxArr, const int B, const int channels, const int row, const int col, const int type);
 
@@ -366,12 +378,23 @@ __global__ void SumSquaredSqrtRows(const float* __restrict__ data, float* __rest
 
 __global__ void SumSquaredSqrtCols(const float* __restrict__ data, float* __restrict__ arr,const int B, const int channels, const int row, const int col);
 
-__global__ void ISNAN(const float* __restrict__ X, const long long total);
+template<typename numeric>
+__global__ void ISNAN(const numeric* __restrict__ X, const unsigned long long total)
+{
+    const unsigned long long idx = threadIdx.x + blockDim.x*blockIdx.x;
+    if(idx >= total) return;
+    if(X[idx] != X[idx])
+    {
+        if (idx == 0) printf("NaN at idx=%lld, value=%f\n", idx, X[idx]);
+        __trap();
+    }
+    return;
+}
 
-__global__ void GatherEmbeddings(float* __restrict__ output,const float* __restrict__ EmbedSpace,const int* __restrict__ keys, int c, int max_c, const int embed_dim, const long long total);
+__global__ void GatherEmbeddings(float* __restrict__ output,const float* __restrict__ EmbedSpace,const int* __restrict__ keys, int c, int max_c, const int embed_dim, const unsigned long long total);
 
 template <typename T1, typename T2>
-void ScaleValue(T1*  __restrict__ X, const T2 scale, const long long total, const int type = 0)
+void ScaleValue(T1*  __restrict__ X, const T2 scale, const unsigned long long total, const int type = 0)
 {
     const int tpb = THREADSPERBLOCK;
     const int bpg = (total + tpb - 1) / tpb;
@@ -379,7 +402,7 @@ void ScaleValue(T1*  __restrict__ X, const T2 scale, const long long total, cons
 };
 
 template <typename T1, typename T2>
-void ScaleGraph(const T1* __restrict__  X, T1* __restrict__ Y, const T2 scale, const long long total, const int deriv = 0)
+void ScaleGraph(const T1* __restrict__  X, T1* __restrict__ Y, const T2 scale, const unsigned long long total, const int deriv = 0)
 {
     const int tpb = THREADSPERBLOCK;
     const int bpg = (total + tpb - 1) / tpb;
@@ -388,7 +411,7 @@ void ScaleGraph(const T1* __restrict__  X, T1* __restrict__ Y, const T2 scale, c
 };
 
 template <typename T1, typename T2>
-void ScalePtr(T1* __restrict__ X, const T2* __restrict__ scale, const long long total, const int type = 0)
+void ScalePtr(T1* __restrict__ X, const T2* __restrict__ scale, const unsigned long long total, const int type = 0)
 {
     const int tpb = THREADSPERBLOCK;
     const int bpg = (total + tpb - 1) / tpb;
@@ -399,23 +422,32 @@ __global__ void TopKSampleKernel(const float* __restrict__ arr, int* __restrict_
 
 __global__ void ArgMax(const float* __restrict__ arr, int* __restrict__ X, const int size);
 
-__global__ void identityKernel(float* __restrict__ input, const int B, const int channels, const int row_col);
+__global__ void identityKernel(float* __restrict__ input, const int B, const int C, const int R, const float scale = 1.f);
 
-__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const long long total, const int deriv = 0);
+__global__ void clampKernel(const float* __restrict__ input, const float* __restrict__ grad, float* __restrict__ output, const float min, const float max, const unsigned long long total, const int deriv = 0);
 
 __global__ void minKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
-                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv=0);
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const unsigned long long size, const int deriv=0);
 
 __global__ void maxKernel(const float* __restrict__ inp_A, const float* __restrict__ inp_B, float* __restrict__ mask, 
-                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const long long size, const int deriv=0);
+                          float* __restrict__ grad_A, float* __restrict__ grad_B, float* __restrict__ output, const unsigned long long size, const int deriv=0);
 
-__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const long long total, const bool deriv = false);
+__global__ void getactionKernel(const float* __restrict__ input, const float* __restrict__ actions, float* __restrict__ output, const int action_dim, const unsigned long long total, const bool deriv = false);
 
 __global__ void static_assign_values( const float* __restrict__ traj, const float* __restrict__ advantages, const float* __restrict__ returns, 
     const float* __restrict__ states, const int*   __restrict__ idx,  
     float* __restrict__ out_actions, float* __restrict__ out_logp, float* __restrict__ out_adv,
     float* __restrict__ out_ret, float* __restrict__ out_states,
     const int total, const int state_dim, const int mini_batch_offset);
+
+
+__global__ void gather_trajectory(
+    const float* __restrict__ rep_state, const float* __restrict__ rep_traj,
+    const float* __restrict__ rep_advantages, const float* __restrict__ rep_returns,
+    const int start, const int T, const int state_total,
+    float* __restrict__ out_states, float* __restrict__ out_actions,
+    float* __restrict__ out_log_probs_old, float* __restrict__ out_advantages,
+    float* __restrict__ out_returns);
 
 
 __global__ void dqn_assign_values(const float* __restrict__ state_replay, const float* __restrict__ replay_traj, 
@@ -426,7 +458,7 @@ __global__ void dqn_assign_values(const float* __restrict__ state_replay, const 
 
 __global__ void scatter_images_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int*   __restrict__ d_row_idx, int stride, int img_size);
 
-__global__ void onehot_kernel(float* __restrict__ d_labels,  const int* __restrict__ d_row_idx, const float* __restrict__ d_src, int stride);
+__global__ void onehot_kernel(float* __restrict__ labels, const int* __restrict__ row_idx, const float* __restrict__ src,int batch, int stride);
 
 __global__ void cl_scatter_kernel(const float* __restrict__ d_src, float* __restrict__ d_out, const int* __restrict__ d_src_rows, int stride, int img_size);
 
@@ -439,6 +471,12 @@ __global__ void nceDerivKernel(const float* __restrict__ X, const float* __restr
 
 // regular ol matrix ops
 
+__global__ void only_diagonal_kernel(const float* __restrict__ X, float* __restrict__ Y, const int B, const int C, const int H);
+
+__global__ void augmentedRowReduction(float* __restrict__ X, float* __restrict__ Y, const int B, const int C, const int H);
+
+__global__ void diagonalKernel(const float* __restrict__ X, float* __restrict__ output, const int B, const int C, const int H);
+
 __global__ void scalar_diagonal_sum(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H);
 
 __global__ void scalar_diagonal_product(const float* __restrict__ A, float* __restrict__ output, const int B, const int C, const int H);
@@ -450,3 +488,11 @@ __global__ void lu_factorization(float* __restrict__ L, float* __restrict__ U, c
 __global__ void solveLX(const float* __restrict__ L, float* __restrict__ X, const int B, const int C, const int H);
 
 __global__ void solveUy(const float* __restrict__ U,const float* __restrict__ Y, float* __restrict__ X, const int B, const int C, const int H);
+
+__global__ void gram_schmidt_rows(float* __restrict__ Q, float* __restrict__ R, const int B, const int C, const int H);
+
+__global__ void gram_schmidt_cols(float* __restrict__ Q, float* __restrict__ R, const int B, const int C, const int H);
+
+__global__ void frechet_preparation(const float* __restrict__ X, const float* __restrict__  dY, float* __restrict__ dX, const unsigned int B, const unsigned int C, const unsigned int H);
+
+__global__ void collect_frechet(const float* __restrict__ dY, float* __restrict__ dX, const unsigned int B, const unsigned int C, const unsigned int H);
